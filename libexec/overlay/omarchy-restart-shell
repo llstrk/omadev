@@ -1,0 +1,21 @@
+#!/bin/bash
+# Nested-safe shell restart. The stock omarchy-restart-shell takes the host's
+# OMARCHY_PATH from the systemd user environment and kills every quickshell
+# running that config on any display, which is the host bar. This one only
+# touches instances on the current (nested) display and relaunches through the
+# nested compositor.
+[[ -n ${OMARCHY_PATH:-} && -f $OMARCHY_PATH/shell/shell.qml ]] ||
+  { echo "Omarchy shell config not found: ${OMARCHY_PATH:-unset}/shell" >&2; exit 1; }
+[[ -n ${HYPRLAND_INSTANCE_SIGNATURE:-} ]] || { echo "not inside a nested Omarchy session" >&2; exit 1; }
+
+while timeout 5 quickshell kill -p "$OMARCHY_PATH/shell" >/dev/null 2>&1; do :; done
+hyprctl dispatch 'hl.dsp.exec_cmd("omarchy-launch-shell")' >/dev/null
+
+for (( attempt = 0; attempt < 50; attempt++ )); do
+  if OMARCHY_SHELL_IPC_TIMEOUT=0.5s omarchy-shell shell ping >/dev/null 2>&1; then
+    exit 0
+  fi
+  sleep 0.1
+done
+echo "Nested Omarchy shell did not become ready after restart." >&2
+exit 1

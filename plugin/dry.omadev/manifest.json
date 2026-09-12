@@ -1,0 +1,53 @@
+{
+  "schemaVersion": 1,
+  "id": "dry.omadev",
+  "name": "Omadev",
+  "version": "0.1.0",
+  "author": "dry",
+  "license": "MIT",
+  "description": "On the host: the running omadev sessions as buttons (click to focus and capture keys; click the icon to start one). Inside a session: whether the host is passing keys here, click to take or release them.",
+  "kinds": [
+    "bar-widget"
+  ],
+  "entryPoints": {
+    "barWidget": "Omadev.qml"
+  },
+  "barWidget": {
+    "displayName": "Omadev",
+    "description": "Active omadev sessions on the host; key capture state inside a session.",
+    "category": "System",
+    "allowMultiple": false,
+    "defaultSection": "right",
+    "defaults": {
+      "submap": "nested",
+      "compactBelow": 1300,
+      "iconOnlyBelow": 900
+    },
+    "schema": [
+      {
+        "key": "submap",
+        "type": "string",
+        "label": "Host submap that passes keys to the nest",
+        "defaultValue": "nested"
+      },
+      {
+        "key": "compactBelow",
+        "type": "integer",
+        "label": "Inside a session: shorten the capture label below this width (px)",
+        "min": 0,
+        "max": 10000,
+        "step": 50,
+        "defaultValue": 1300
+      },
+      {
+        "key": "iconOnlyBelow",
+        "type": "integer",
+        "label": "Inside a session: icon and slot only below this width (px)",
+        "min": 0,
+        "max": 10000,
+        "step": 50,
+        "defaultValue": 900
+      }
+    ]
+  }
+}

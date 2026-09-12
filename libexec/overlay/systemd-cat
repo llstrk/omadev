@@ -1,0 +1,17 @@
+#!/bin/bash
+# Nested stand-in for systemd-cat: retag journal output so one nest's shell
+# and apps can be read apart from the host's (`omadev log N`).
+# omarchy-launch-shell hardcodes `-t omarchy-shell`; keep the original tag
+# in the message prefix would need a pipe, so just swap the identifier.
+tag=omadev-${OMADEV_SLOT:-x}
+args=()
+while (($#)); do
+  case $1 in
+    -t|--identifier) shift 2 ;;
+    -t=*|--identifier=*) shift ;;
+    --) shift; break ;;
+    -*) args+=("$1"); shift ;;
+    *) break ;;
+  esac
+done
+exec /usr/bin/systemd-cat -t "$tag" "${args[@]}" -- "$@"

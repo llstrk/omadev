@@ -1,0 +1,29 @@
+#!/bin/bash
+# Nested stand-in for uwsm-app. The real one hands the command to
+# wayland-wm-app-daemon, which spawns it with the host session's environment,
+# so every app would open on the host desktop. Run it here instead.
+terminal=0
+while (($#)); do
+  case $1 in
+    --) shift; break ;;
+    -T) terminal=1; shift ;;
+    -s|-t|-a|-u|-d|-D) shift 2 ;;
+    ping) exit 0 ;;
+    stop) exit 0 ;;
+    -*) shift ;;
+    *) break ;;
+  esac
+done
+(($#)) || exit 0
+if (( terminal )); then
+  if command -v xdg-terminal-exec >/dev/null; then
+    set -- xdg-terminal-exec -- "$@"
+  else
+    set -- "${TERMINAL:-alacritty}" -e "$@"
+  fi
+fi
+if command -v systemd-cat >/dev/null; then
+  setsid -f -- systemd-cat -t "omadev-${OMADEV_SLOT:-x}" -- "$@" </dev/null
+else
+  setsid -f -- "$@" </dev/null >/dev/null 2>&1
+fi

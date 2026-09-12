@@ -1,0 +1,910 @@
+#!/usr/bin/env python3
+# omarchy:summary=Run Omarchy sessions as windows inside the current one (slots 1-9)
+# omarchy:args=[start [N] [--detach] [--path <dir>]] | ensure N | list | focus N | run|hyprctl|shell|log [N] ... | stop [N|all]
+"""omadev: run Omarchy sessions as windows inside the current one.
+
+Up to nine nests run side by side, each with its own compositor, session bus,
+omarchy-shell and Omarchy source tree. They share the kernel, the user,
+sysfs, the system bus and the real home, so plugins that read battery, power
+limits or DDC see the real hardware. Only ~/.config/omarchy, ~/.local/state/omarchy
+and browser profiles are private copies, so a nest never changes the host's setup.
+"""
+
+from __future__ import annotations
+
+import argparse
+import contextlib
+import json
+import math
+import os
+import re
+import shlex
+import shutil
+import signal
+import socket
+import subprocess
+import sys
+import time
+from pathlib import Path
+
+SELF = Path(os.path.realpath(__file__))
+ROOT = SELF.parent.parent / "libexec"
+RUNTIME_DIR = Path(os.environ.get("XDG_RUNTIME_DIR") or f"/run/user/{os.getuid()}")
+RUN_DIR = RUNTIME_DIR / "omadev"
+# Nest homes live on the real filesystem (btrfs), not tmpfs: reflink copies
+# need it, and a home is kept after stop for diffing.
+HOME_BASE = Path(os.environ.get("OMADEV_HOME_BASE") or (Path.home() / ".local/state/omadev"))
+SLOTS = range(1, 10)
+
+# Lines every nest emits because the host already owns the session-wide
+# service, or because the private bus has no systemd.
+NOISE = re.compile(
+    r"Failed to register with host portal|Could not register app ID|authentication agent already exists"
+    r'|failed to register listener on path "/org/omarchy/PolkitAgent"|org\.a11y\.atspi'
+    r"|Activat(ed|ing) service .*org\.freedesktop\.systemd1|Errors from xkbcomp are not fatal"
+    r"|Handler was registered but will not be used"
+)
+# Bus-activatable services the nest must not start: the Hyprland portal
+# segfaults against a nested compositor and at-spi loops without systemd.
+# The host already provides both for the session.
+NO_ACTIVATE = re.compile(r"^(org\.freedesktop\.(impl\.)?portal\.|org\.a11y\.)")
+
+USAGE = """\
+Usage:
+  omadev [start] [N] [options] [-- <extra Hyprland args>]
+  omadev ensure N [options]        Start nest N if needed, wait for its shell, print JSON (idempotent;
+                                           --plugin is applied to a running nest too)
+  omadev list [--json]             The nine slots; --json includes each nest's environment
+  omadev focus [N]                 Focus nest N on the host and capture keys (no N: the focused nest);
+                                   user-only: needs OMADEV_ALLOW_CAPTURE=1, which the binding and widget set
+  omadev run [N] <command...>      Run a command with nest N's environment (and its private HOME)
+  omadev hyprctl [N] <args...>     hyprctl against nest N
+  omadev shell [N] <args...>       omarchy-shell IPC against nest N's shell
+  omadev screenshot [N] [file]     grim inside nest N; prints the file
+  omadev log [N] [-f] [--all]      Journal of nest N's shell and apps; --all keeps known-benign noise
+  omadev diff N                    What nest N changed in its Omarchy config and state
+  omadev stop [N|all] [--kill]     Ask the nest to exit and wait until it is gone (15 s; --kill then SIGTERM)
+  omadev clean [N|all]             Remove a stopped nest's private home, launcher log and screenshots
+
+N is a slot number 1-9. start picks the lowest free slot when N is omitted;
+other commands may omit N when one nest runs or when run from inside a nest.
+
+Start options:
+  --detach         Return once the nest's shell answers (30 s); output goes to the slot's launcher.log.
+                   Without it start blocks for the life of the nest; Ctrl-C ends it.
+  --owner <name>   Label the nest (shown by list; for orchestrators assigning slots to teammates)
+  --path <dir>     Omarchy source tree (default: $OMADEV_PATH, then $OMARCHY_PATH)
+  --scale <n>      Output scale of the nest (default: 1); its size always follows the host window
+  --place <mode>   workspace: the nest joins the host workspace named omadev without stealing focus (default)
+                   tile: leave the window where the host's layout puts it   (env: OMADEV_PLACE)
+  --no-shell       Compositor only
+  --idle           Let the nested shell run its idle/screensaver/lock cycle (default: inhibited)
+  --reuse          Keep this slot's previous private home instead of cloning a fresh one
+  --plugin <dir>   Link a plugin checkout (e.g. a git worktree) into the nest's plugins under its
+                   manifest id; repeatable
+
+Every nest gets a private home: reflink clones of ~/.config/omarchy and ~/.local/state/omarchy
+plus empty browser profiles, and symlinks to everything else. shell.json, plugins, toggles and
+theme state of a nest never touch the host; `diff N` shows what it changed.
+
+Inside a nest: `omarchy restart shell` restarts only that nest's shell, `wtype` types into it,
+`hyprctl dispatch '<lua>'` drives its compositor. Host keys: Super+Alt+D opens the sessions panel,
+Super+Shift+Alt+D toggles key passthrough for the focused nest. `omarchy nested ...` is not routed by the Omarchy CLI.
+"""
+
+
+class Fail(Exception):
+    pass
+
+
+def die(msg: str) -> None:
+    raise Fail(msg)
+
+
+def is_slot(value) -> bool:
+    return isinstance(value, str) and re.fullmatch(r"[1-9]", value) is not None
+
+
+# ---------------------------------------------------------------- slot state
+# A running nest publishes its environment to $RUN_DIR/N/session.env (shell
+# quoted KEY=value, written by `_publish` from inside the compositor).
+
+def env_file(slot: int) -> Path:
+    return RUN_DIR / str(slot) / "session.env"
+
+
+def read_env(slot: int) -> dict[str, str]:
+    env: dict[str, str] = {}
+    try:
+        lines = env_file(slot).read_text().splitlines()
+    except FileNotFoundError:
+        return env
+    for line in lines:
+        key, _, raw = line.partition("=")
+        parts = shlex.split(raw) if raw else [""]
+        env[key] = parts[0]
+    return env
+
+
+def socket_verdict(sock: Path) -> str | None:
+    """'alive' if the nest's compositor accepts connections, 'dead' if its instance
+    directory is gone, None if this environment cannot tell (socket not mounted,
+    read-only or otherwise inaccessible)."""
+    try:
+        with socket.socket(socket.AF_UNIX) as s:
+            s.settimeout(1)
+            s.connect(str(sock))
+        return "alive"
+    except ConnectionRefusedError:
+        return "dead"
+    except FileNotFoundError:
+        return "dead" if sock.parent.parent.is_dir() else None
+    except OSError:
+        return None
+
+
+def slot_health(slot: int) -> str:
+    """'free' (no record), 'alive', 'dead' (stale record) or 'unreachable' (a record
+    exists but neither the compositor socket nor the process can be verified from
+    here, e.g. inside an agent sandbox with its own PID namespace or read-only mounts)."""
+    env = read_env(slot)
+    pid = env.get("OMADEV_PID", "")
+    if not pid.isdigit():
+        return "free"
+    sig = env.get("HYPRLAND_INSTANCE_SIGNATURE", "")
+    verdict = socket_verdict(Path(env.get("XDG_RUNTIME_DIR") or RUNTIME_DIR) / "hypr" / sig / ".socket.sock") if sig else None
+    if verdict:
+        return verdict
+    try:
+        os.kill(int(pid), 0)
+        return "alive"
+    except ProcessLookupError:
+        return "unreachable"  # or dead, but a foreign PID namespace looks the same; never trust this alone
+    except PermissionError:
+        return "alive"
+
+
+def slot_alive(slot: int) -> bool:
+    return slot_health(slot) == "alive"
+
+
+def slot_state(slot: int) -> str:
+    health = slot_health(slot)
+    if health in ("free", "dead"):
+        return "free"
+    if health == "unreachable":
+        return "unreachable"
+    return "stopping" if (RUN_DIR / str(slot) / "stopping").exists() else "running"
+
+
+def nest_home(slot: int) -> Path | None:
+    path = HOME_BASE / str(slot) / "home"
+    return path if (path / ".config/omarchy").is_dir() else None
+
+
+def pick_slot(arg: str | None) -> int:
+    """Explicit digit, else the nest we are inside, else the only running one."""
+    if is_slot(arg):
+        return int(arg)
+    inside = os.environ.get("OMADEV_SLOT", "")
+    if is_slot(inside):
+        return int(inside)
+    slots = [n for n in SLOTS if slot_alive(n)]
+    if len(slots) != 1:
+        die("no nested session is running" if not slots else
+            f"several nests are running ({' '.join(map(str, slots))}); say which: omadev <command> N ...")
+    return slots[0]
+
+
+def split_slot(args: list[str]) -> tuple[int, list[str]]:
+    if args and is_slot(args[0]):
+        return int(args[0]), args[1:]
+    return pick_slot(None), args
+
+
+def nest_env(slot: int) -> dict[str, str]:
+    """The nest's environment on top of ours; dies if the nest is gone. Never
+    removes the session record: only the launcher that wrote it does that."""
+    health = slot_health(slot)
+    if health == "unreachable":
+        die(f"nest {slot} has a session record but cannot be reached from this environment "
+            f"(its compositor socket under {RUNTIME_DIR}/hypr is not accessible; agent sandbox?)")
+    if health != "alive":
+        die(f"nest {slot} is not running")
+    return {**os.environ, **read_env(slot)}
+
+
+def shell_ping(slot: int) -> bool:
+    if not slot_alive(slot):
+        return False
+    env = {**os.environ, **read_env(slot), "OMARCHY_SHELL_IPC_TIMEOUT": "1s"}
+    try:
+        return subprocess.run(["omarchy-shell", "shell", "ping"], env=env, capture_output=True, timeout=5).returncode == 0
+    except (subprocess.TimeoutExpired, FileNotFoundError):
+        return False
+
+
+def wait_until(pred, timeout: float) -> bool:
+    deadline = time.time() + timeout
+    while not pred():
+        if time.time() > deadline:
+            return False
+        time.sleep(0.25)
+    return True
+
+
+def linked_plugins(sb: Path | None) -> dict[str, str]:
+    if not sb:
+        return {}
+    return {p.name: os.path.realpath(p) for p in (sb / ".config/omarchy/plugins").glob("*") if p.is_symlink()}
+
+
+def slot_json(slot: int) -> dict:
+    state = slot_state(slot)
+    sb = nest_home(slot)
+    if state == "free":
+        return {"slot": slot, "state": state, "home": str(sb) if sb else None, "plugins": linked_plugins(sb)}
+    env = read_env(slot)
+    return {
+        "slot": slot, "state": state,
+        "owner": env.get("OMADEV_OWNER", ""),
+        "pid": int(env["OMADEV_PID"]),
+        "display": env.get("WAYLAND_DISPLAY"),
+        "omarchy_path": env.get("OMARCHY_PATH"),
+        "home": env.get("OMADEV_HOME") or None,
+        "plugins": linked_plugins(sb),
+        "started_at": int(env_file(slot).stat().st_mtime),
+        "env": env,
+    }
+
+
+def host_refresh() -> None:
+    """Tell the host bar's dry.omadev widget the slot list changed."""
+    env = {**os.environ, "OMARCHY_SHELL_IPC_TIMEOUT": "1s"}
+    try:
+        subprocess.run(["omarchy-shell", "-q", "dry.omadev", "refresh"], env=env, capture_output=True, timeout=5)
+    except (subprocess.TimeoutExpired, FileNotFoundError):
+        pass
+
+
+# ---------------------------------------------------------------- private home
+
+def link_entries(src: Path, dst: Path, skip: set[str]) -> None:
+    for entry in src.iterdir():
+        if entry.name not in skip:
+            (dst / entry.name).symlink_to(entry)
+
+
+BROWSER_PROFILES = ("chromium", "google-chrome", "BraveSoftware", "microsoft-edge", "vivaldi")
+
+
+def make_home(slot: int, reuse: bool) -> Path:
+    """The nest's private home: symlinks to the real one, except
+    ~/.config/omarchy and ~/.local/state/omarchy, which are reflink clones the
+    nest owns, and browser profiles, which start empty."""
+    real = Path.home()
+    sb = HOME_BASE / str(slot) / "home"
+    if sb.is_dir() and reuse:
+        return sb
+    shutil.rmtree(sb, ignore_errors=True)
+    (sb / ".config").mkdir(parents=True)
+    (sb / ".local/state").mkdir(parents=True)
+    link_entries(real, sb, {".config", ".local"})
+    link_entries(real / ".config", sb / ".config", {"omarchy", *BROWSER_PROFILES})
+    # Chromium-family browsers are single-instance per profile: through a
+    # linked profile, a browser started in the nest would just open a window
+    # in the browser already running on the host. Fresh, empty profiles here.
+    for name in BROWSER_PROFILES:
+        if (real / ".config" / name).is_dir():
+            (sb / ".config" / name).mkdir()
+    link_entries(real / ".local", sb / ".local", {"state"})
+    link_entries(real / ".local/state", sb / ".local/state", {"omarchy"})
+    for rel in (".config/omarchy", ".local/state/omarchy"):
+        if (real / rel).is_dir():
+            subprocess.run(["cp", "-a", "--reflink=auto", str(real / rel), str(sb / rel)], check=True)
+        else:
+            (sb / rel).mkdir()
+    # The shell replays persisted popups at start; the nest begins with none.
+    shutil.rmtree(sb / ".local/state/omarchy/notifications", ignore_errors=True)
+    (sb / ".local/state/omarchy/notifications").mkdir()
+    return sb
+
+
+def plugin_id(plugin: Path) -> str:
+    try:
+        pid = json.loads((plugin / "manifest.json").read_text()).get("id")
+    except (OSError, json.JSONDecodeError) as exc:
+        die(f"{plugin}: no readable manifest.json ({exc})")
+    return pid or die(f"{plugin}/manifest.json has no id")
+
+
+def link_plugin(sb: Path, plugin: Path) -> None:
+    target = sb / ".config/omarchy/plugins" / plugin_id(plugin)
+    target.parent.mkdir(parents=True, exist_ok=True)
+    if target.is_symlink() or target.is_file():
+        target.unlink()
+    elif target.is_dir():
+        shutil.rmtree(target)
+    target.symlink_to(plugin)
+
+
+def cmd_diff(args: list[str]) -> int:
+    if not args or not is_slot(args[0]):
+        die("diff needs a slot number 1-9")
+    sb = nest_home(int(args[0])) or die(f"nest {args[0]} has no private home (never started, or cleaned)")
+    real = Path.home()
+    print(f"# nest home {sb} vs real home; linked plugin checkouts are excluded (diff those with git)", flush=True)
+    linked = [f"--exclude={p.name}" for p in (sb / ".config/omarchy/plugins").glob("*") if p.is_symlink()]
+    churn = ["--exclude=clipboard-images", "--exclude=clipboard-history.json", "--exclude=notifications", "--exclude=agents"]
+    for rel, extra in ((".config/omarchy", linked), (".local/state/omarchy", churn)):
+        subprocess.run(["diff", "-ruN", "--exclude=.git", *extra, str(real / rel), str(sb / rel)])
+    return 0
+
+
+def cmd_clean(args: list[str]) -> int:
+    target = args[0] if args else ""
+    slots = list(SLOTS) if target == "all" else [int(target)] if is_slot(target) else die("clean needs a slot number 1-9 or all")
+    for slot in slots:
+        home, runtime = HOME_BASE / str(slot), RUN_DIR / str(slot)
+        if not home.is_dir() and not runtime.is_dir():
+            continue
+        if slot_alive(slot):
+            die(f"nest {slot} is running; stop it first")
+        shutil.rmtree(home, ignore_errors=True)
+        shutil.rmtree(runtime, ignore_errors=True)
+        print(f"cleaned nest {slot}")
+    return 0
+
+
+# ---------------------------------------------------------------- start
+
+def parse_start(argv: list[str]) -> argparse.Namespace:
+    p = argparse.ArgumentParser(prog="omadev start", add_help=False)
+    p.add_argument("slot", nargs="?")
+    for flag in ("detach", "no-shell", "idle", "reuse", "help"):
+        p.add_argument("--" + flag, action="store_true")
+    p.add_argument("--sandbox", action="store_true", help=argparse.SUPPRESS)  # former option; every nest is one now
+    p.add_argument("--reuse-sandbox", dest="reuse", action="store_true", help=argparse.SUPPRESS)
+    p.add_argument("--owner", default="")
+    p.add_argument("--path", default=os.environ.get("OMADEV_PATH") or os.environ.get("OMARCHY_PATH") or "/usr/share/omarchy")
+    p.add_argument("--size", default="", help=argparse.SUPPRESS)  # refused below, with a reason
+    p.add_argument("--scale", default="1")
+    p.add_argument("--place", default=os.environ.get("OMADEV_PLACE") or "workspace", choices=["workspace", "tile"])
+    p.add_argument("--plugin", action="append", default=[])
+    # Everything after "--" goes to Hyprland untouched.
+    extra: list[str] = []
+    if "--" in argv:
+        argv, extra = argv[:argv.index("--")], argv[argv.index("--") + 1:]
+    try:
+        ns = p.parse_args(argv)
+    except SystemExit:
+        raise Fail("bad start arguments (see --help)") from None
+    ns.extra = extra
+    if ns.slot is not None and not is_slot(ns.slot):
+        die(f"unknown option: {ns.slot} (see --help)")
+    return ns
+
+
+def validate_start(ns: argparse.Namespace) -> tuple[Path, list[Path]]:
+    if not os.environ.get("WAYLAND_DISPLAY"):
+        die("run this from inside a Wayland session")
+    if os.environ.get("OMADEV_SLOT"):
+        die(f"start nests from the host session, not from inside nest {os.environ['OMADEV_SLOT']}")
+    for tool in ("Hyprland", "quickshell", "dbus-run-session"):
+        shutil.which(tool) or die(f"{tool} is not installed")
+    path = Path(os.path.realpath(ns.path))
+    for rel in ("default/hypr/bootstrap.lua", "shell/shell.qml"):
+        (path / rel).is_file() or die(f"{path} is not an Omarchy source tree (no {rel})")
+    ns.size and die("--size is not supported: a nest always follows the size of its host window")
+    plugins = [Path(os.path.realpath(p)) for p in ns.plugin]
+    for plugin in plugins:
+        plugin_id(plugin)
+    return path, plugins
+
+
+def lock_file(slot: int) -> Path:
+    return RUN_DIR / str(slot) / "lock"
+
+
+def claim_slot(slot: int) -> bool:
+    """Atomically mark a slot as being started, so two concurrent starts can
+    never pick the same one. The lock holds the launcher's PID; a lock whose
+    holder is gone is stale and taken over."""
+    lock_file(slot).parent.mkdir(parents=True, exist_ok=True)
+    for _ in range(2):
+        try:
+            fd = os.open(lock_file(slot), os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o644)
+        except FileExistsError:
+            holder = lock_file(slot).read_text().strip() if lock_file(slot).exists() else ""
+            with contextlib.suppress(ProcessLookupError, ValueError):
+                os.kill(int(holder), 0)
+                return False  # someone alive is starting this slot
+            lock_file(slot).unlink(missing_ok=True)
+            continue
+        os.write(fd, str(os.getpid()).encode())
+        os.close(fd)
+        return True
+    return False
+
+
+def choose_slot(requested: str | None) -> int:
+    if os.environ.get("OMADEV_CLAIMED") == (requested or ""):  # detached child: the parent claimed it
+        lock_file(int(requested)).write_text(str(os.getpid()))
+        return int(requested)
+    if requested:
+        if slot_alive(int(requested)):
+            die(f"nest {requested} is already running; stop it first or pick another slot")
+        if not claim_slot(int(requested)):
+            die(f"nest {requested} is being started by another process")
+        return int(requested)
+    for n in SLOTS:
+        if slot_health(n) in ("free", "dead") and claim_slot(n):
+            return n
+    die("all nine slots are running, being started, or unreachable from here")
+
+
+def nest_environment(slot: int, ns: argparse.Namespace, path: Path, plugins: list[Path]) -> dict[str, str]:
+    env = dict(os.environ)
+    sb = make_home(slot, ns.reuse)
+    for plugin in plugins:
+        link_plugin(sb, plugin)
+    env.update(OMADEV_HOME=str(sb), HOME=str(sb), XDG_CONFIG_HOME=str(sb / ".config"),
+               XDG_STATE_HOME=str(sb / ".local/state"), XDG_DATA_HOME=str(sb / ".local/share"),
+               XDG_CACHE_HOME=str(sb / ".cache"))
+    env.update(
+        OMARCHY_PATH=str(path),
+        OMADEV_OWNER=ns.owner,
+        OMADEV_ROOT=str(ROOT),
+        OMADEV_SLOT=str(slot),
+        OMADEV_ENV_FILE=str(env_file(slot)),
+        OMADEV_SCALE=ns.scale,
+        OMADEV_PLACE=ns.place,
+        OMADEV_NO_SHELL="1" if ns.no_shell else "0",
+        OMADEV_IDLE="1" if ns.idle else "0",
+        OMADEV_HOST=os.environ["WAYLAND_DISPLAY"],
+        OMADEV_HOST_SIG=os.environ.get("HYPRLAND_INSTANCE_SIGNATURE", ""),
+        PATH=f"{ROOT / 'overlay'}:{os.environ.get('PATH', '/usr/local/bin:/usr/bin')}",
+        # No systemd on the private bus, so at-spi would loop trying to activate it.
+        NO_AT_BRIDGE="1", GTK_A11Y="none",
+    )
+    # The nested compositor issues its own signature; config-time helpers
+    # must not talk to the host instance.
+    env.pop("HYPRLAND_INSTANCE_SIGNATURE", None)
+    env.pop("HYPRLAND_CMD", None)
+    return env
+
+
+def private_bus_config(slot: int) -> Path:
+    """A session bus config like the system one, but activating only the
+    services we allow (see NO_ACTIVATE)."""
+    services = RUN_DIR / str(slot) / "dbus-services"
+    shutil.rmtree(services, ignore_errors=True)
+    services.mkdir(parents=True)
+    for d in (Path("/usr/share/dbus-1/services"), Path("/usr/local/share/dbus-1/services"),
+              Path.home() / ".local/share/dbus-1/services"):
+        for f in d.glob("*.service") if d.is_dir() else []:
+            if not NO_ACTIVATE.match(f.name):
+                (services / f.name).symlink_to(f)
+    conf = (Path("/usr/share/dbus-1/session.conf").read_text()
+            .replace("<standard_session_servicedirs />", f"<servicedir>{services}</servicedir>")
+            .replace("<includedir>session.d</includedir>", "<includedir>/usr/share/dbus-1/session.d</includedir>"))
+    path = RUN_DIR / str(slot) / "session.conf"
+    path.write_text(conf)
+    return path
+
+
+def host_window(pid: str) -> str | None:
+    """Address of the host window owned by `pid`; None if there is none.
+    If the host cannot be asked, pretend it is still there ("" address)."""
+    try:
+        out = subprocess.run(["hyprctl", "clients", "-j"], capture_output=True, text=True, timeout=5)
+        return next((c["address"] for c in json.loads(out.stdout) if str(c.get("pid")) == pid), None)
+    except (subprocess.TimeoutExpired, OSError, ValueError):
+        return ""
+
+
+def hostctl_json(*args: str) -> list | dict:
+    try:
+        out = subprocess.run(["hyprctl", "-j", *args], capture_output=True, text=True, timeout=5)
+        return json.loads(out.stdout)
+    except (subprocess.TimeoutExpired, OSError, ValueError):
+        return []
+
+
+def host_dispatch(lua: str) -> None:
+    with contextlib.suppress(OSError, subprocess.SubprocessError):
+        subprocess.run(["hyprctl", "dispatch", lua], capture_output=True, timeout=5)
+
+
+# Installed into the host compositor's Lua state before a nest starts, once per
+# state (a host `hyprctl reload` resets it and the next start re-adds it): the
+# window opens on the omadev workspace, floating, without taking focus. The
+# launcher's own placement below stays as the fallback.
+HOST_RULE = ('if not _G.omadev_rule then _G.omadev_rule = hl.window_rule({ name = "omadev-nest", '
+             'match = { class = "aquamarine" }, no_initial_focus = true, float = true, '
+             'workspace = "name:omadev silent" }) end')
+
+
+def ensure_host_rule() -> None:
+    with contextlib.suppress(OSError, subprocess.SubprocessError):
+        subprocess.run(["hyprctl", "eval", HOST_RULE], capture_output=True, timeout=5)
+
+
+def place_window(slot: int, address: str) -> None:
+    """Put the nest on the shared host workspace "omadev" without switching to it."""
+    host_dispatch(f'hl.dsp.window.move({{ window = "address:{address}", workspace = "name:omadev", follow = false }})')
+    regrid()
+
+
+def regrid() -> None:
+    """Arrange every nest window on the omadev workspace as an even grid of
+    floating windows; dwindle would halve whatever was focused last."""
+    pids = {read_env(n).get("OMADEV_PID", ""): n for n in SLOTS if slot_alive(n)}
+    windows = sorted((pids[str(c["pid"])], c) for c in hostctl_json("clients")
+                     if str(c.get("pid")) in pids and c.get("workspace", {}).get("name") == "omadev")
+    monitor_id = next((w["monitorID"] for w in hostctl_json("workspaces") if w.get("name") == "omadev"), None)
+    mon = next((m for m in hostctl_json("monitors") if m.get("id") == monitor_id), None)
+    if not windows or not mon:
+        return
+    gap, left, top, right, bottom = 10, *mon.get("reserved", [0, 0, 0, 0])
+    x0, y0 = mon["x"] + left + gap, mon["y"] + top + gap
+    width = mon["width"] / mon["scale"] - left - right - gap
+    height = mon["height"] / mon["scale"] - top - bottom - gap
+    cols = math.ceil(math.sqrt(len(windows)))
+    rows = math.ceil(len(windows) / cols)
+    cell_h = height / rows
+    for i, (_, c) in enumerate(windows):
+        row, col = divmod(i, cols)
+        in_row = min(cols, len(windows) - row * cols)  # a short last row gets wider cells
+        cell_w = width / in_row
+        w, h = int(cell_w - gap), int(cell_h - gap)
+        x, y = int(x0 + col * cell_w), int(y0 + row * cell_h)
+        sel = f'window = "address:{c["address"]}"'
+        if not c.get("floating"):
+            host_dispatch(f"hl.dsp.window.float({{ {sel} }})")
+        host_dispatch(f"hl.dsp.window.resize({{ {sel}, x = {w}, y = {h}, exact = true }})")
+        host_dispatch(f"hl.dsp.window.move({{ {sel}, x = {x}, y = {y}, exact = true }})")
+
+
+def watch_window(slot: int, child: subprocess.Popen, env: dict[str, str]) -> None:
+    """Wait for the compositor to exit. Places the host window when it first
+    appears; closing it does not end the nested compositor (it just loses its
+    output), so once the window has been seen, its disappearance stops the
+    nest. Must never raise: a launcher that dies here leaves a headless
+    compositor behind."""
+    seen, nest = False, dict(env)
+    while child.poll() is None:
+        with contextlib.suppress(subprocess.TimeoutExpired):
+            child.wait(timeout=2 if seen else 0.3)  # quick until the window is placed
+        if child.poll() is not None:
+            return
+        nest.update(read_env(slot))  # keeps the last known signature if the record disappears
+        pid = nest.get("OMADEV_PID", "")
+        address = host_window(pid) if pid else None
+        shown = address is not None
+        if address and not seen and nest.get("OMADEV_PLACE", "workspace") == "workspace":
+            place_window(slot, address)
+        seen = seen or shown
+        if seen and not shown:
+            stop_headless(slot, child, nest)
+
+
+def stop_headless(slot: int, child: subprocess.Popen, nest: dict[str, str]) -> None:
+    """The host window is gone: ask the compositor to exit, then make it."""
+    print(f"omadev: host window of nest {slot} closed; stopping it", flush=True)
+    with contextlib.suppress(OSError, subprocess.SubprocessError):
+        subprocess.run(["hyprctl", "dispatch", "hl.dsp.exit()"], env=nest, capture_output=True, timeout=5)
+    with contextlib.suppress(subprocess.TimeoutExpired):
+        child.wait(timeout=10)
+    if child.poll() is None:
+        end_compositor(child)
+
+
+STALL_SECONDS = 15   # a healthy nest publishes its record within a few seconds
+START_ATTEMPTS = 3
+
+
+def launch_compositor(slot: int, env: dict[str, str], extra: list[str]) -> subprocess.Popen:
+    # start-hyprland is Hyprland's own watchdog launcher; without it the nest
+    # shows a permanent "started without start-hyprland" banner. Own process
+    # group, so a stalled compositor tree can be killed as a whole.
+    launcher = ["start-hyprland", "--"] if shutil.which("start-hyprland") else ["Hyprland"]
+    return subprocess.Popen(["dbus-run-session", f"--config-file={private_bus_config(slot)}", "--",
+                             *launcher, "-c", str(ROOT / "hyprland.lua"), *extra], env=env, start_new_session=True)
+
+
+def end_compositor(child: subprocess.Popen) -> None:
+    """Terminate politely, then kill the whole process group. dbus-run-session
+    (our direct child) dies from SIGTERM readily, but a compositor stalled in
+    startup ignores it and would survive as an orphan, so the group is always
+    swept afterwards; it holds nothing but this nest's tree."""
+    child.terminate()
+    with contextlib.suppress(subprocess.TimeoutExpired):
+        child.wait(timeout=5)
+    with contextlib.suppress(ProcessLookupError):
+        os.killpg(child.pid, signal.SIGKILL)
+    with contextlib.suppress(subprocess.TimeoutExpired):
+        child.wait(timeout=5)
+
+
+def run_foreground(slot: int, env: dict[str, str], extra: list[str]) -> int:
+    child = launch_compositor(slot, env, extra)
+    for sig in (signal.SIGINT, signal.SIGTERM):
+        signal.signal(sig, lambda *_: child.terminate())
+    try:
+        for attempt in range(1, START_ATTEMPTS + 1):
+            if wait_until(lambda: env_file(slot).is_file() or child.poll() is not None, STALL_SECONDS):
+                break
+            # The nested compositor sometimes stalls in its handshake with the
+            # host (never gets its output, so nothing inside ever starts).
+            # Nothing is lost yet: kill it and try again.
+            print(f"omadev: nest {slot} did not come up within {STALL_SECONDS} s (compositor stalled); "
+                  f"attempt {attempt} of {START_ATTEMPTS}", flush=True)
+            end_compositor(child)
+            if attempt == START_ATTEMPTS:
+                print(f"omadev: giving up on nest {slot}", flush=True)
+                return 1
+            child = launch_compositor(slot, env, extra)
+        host_refresh()
+        watch_window(slot, child, env)
+        return child.returncode
+    finally:
+        env_file(slot).unlink(missing_ok=True)
+        (RUN_DIR / str(slot) / "stopping").unlink(missing_ok=True)
+        lock_file(slot).unlink(missing_ok=True)
+        if env.get("OMADEV_PLACE", "workspace") == "workspace":
+            regrid()  # the remaining nests take the freed space
+        host_refresh()
+
+
+def start_detached(slot: int, argv: list[str], no_shell: bool) -> int:
+    log = RUN_DIR / str(slot) / "launcher.log"
+    child_argv = [sys.executable, str(SELF), "start", str(slot), *[a for a in argv if a != "--detach" and not is_slot(a)]]
+    with open(log, "w") as out, open(os.devnull) as devnull:
+        subprocess.Popen(child_argv, stdin=devnull, stdout=out, stderr=subprocess.STDOUT, start_new_session=True,
+                         env={**os.environ, "OMADEV_CLAIMED": str(slot)})
+    ready = (lambda: slot_alive(slot)) if no_shell else (lambda: shell_ping(slot))
+    if not wait_until(ready, STALL_SECONDS * START_ATTEMPTS + 15):
+        print(f"omadev: nest {slot} did not become ready; see {log}", file=sys.stderr)
+        sys.stderr.write("".join(log.read_text().splitlines(True)[-20:]))
+        return 1
+    env = read_env(slot)
+    # stderr: `ensure` prints JSON on stdout after this.
+    print(f"omadev: nest {slot} up on {env.get('WAYLAND_DISPLAY')} (OMARCHY_PATH={env.get('OMARCHY_PATH')}); "
+          f"log: omadev log {slot}", file=sys.stderr)
+    return 0
+
+
+def cmd_start(argv: list[str]) -> int:
+    ns = parse_start(argv)
+    if ns.help:
+        print(USAGE, end="")
+        return 0
+    path, plugins = validate_start(ns)
+    slot = choose_slot(ns.slot)
+    (RUN_DIR / str(slot)).mkdir(parents=True, exist_ok=True)
+    env_file(slot).unlink(missing_ok=True)
+    if ns.detach:
+        return start_detached(slot, argv, ns.no_shell)
+    env = nest_environment(slot, ns, path, plugins)
+    if ns.place == "workspace":
+        ensure_host_rule()
+    print(f"omadev: slot {slot}  OMARCHY_PATH={path}  scale={ns.scale} "
+          f"shell={0 if ns.no_shell else 1} idle={1 if ns.idle else 0} home={env['OMADEV_HOME']}")
+    print(f"omadev: Super+Shift+Alt+D captures keys for this nest when its window is focused, and releases them; "
+          f"Ctrl-C here or 'omadev stop {slot}' ends it", flush=True)
+    return run_foreground(slot, env, ns.extra)
+
+
+def cmd_ensure(argv: list[str]) -> int:
+    if not argv or not is_slot(argv[0]):
+        die("ensure needs a slot number 1-9")
+    slot, rest = int(argv[0]), argv[1:]
+    if slot_alive(slot):
+        ns, env = parse_start(rest), read_env(slot)
+        if env.get("OMARCHY_PATH") != os.path.realpath(ns.path):
+            die(f"nest {slot} is running {env.get('OMARCHY_PATH')}, not {os.path.realpath(ns.path)}; stop it first")
+        for plugin in ns.plugin:  # links into the live nest home; the nested shell hot-reloads
+            link_plugin(Path(env["OMADEV_HOME"]), Path(os.path.realpath(plugin)))
+        if not shell_ping(slot):
+            die(f"nest {slot} is running but its shell does not answer; see: omadev log {slot}")
+    elif cmd_start([str(slot), "--detach", *rest]) != 0:
+        return 1
+    print(json.dumps(slot_json(slot), indent=2))
+    return 0
+
+
+def cmd_publish(_args: list[str]) -> int:
+    """Runs inside the nested compositor on start: publish its environment so
+    the host-side commands can reach it."""
+    # The private bus was started with the host's display in its activation
+    # environment; point bus-activated services (portals, keyring) at the nest.
+    subprocess.run(["dbus-update-activation-environment", "WAYLAND_DISPLAY", "HYPRLAND_INSTANCE_SIGNATURE", "DISPLAY",
+                    "XDG_CURRENT_DESKTOP", "XDG_SESSION_DESKTOP", "OMARCHY_PATH", "PATH"], capture_output=True)
+    # The compositor's own PID, from its lock file; the host finds our window by it.
+    lock = RUNTIME_DIR / "hypr" / os.environ.get("HYPRLAND_INSTANCE_SIGNATURE", "") / "hyprland.lock"
+    os.environ["OMADEV_PID"] = lock.read_text().split("\n", 1)[0].strip()
+    keys = ["WAYLAND_DISPLAY", "HYPRLAND_INSTANCE_SIGNATURE", "DBUS_SESSION_BUS_ADDRESS", "OMARCHY_PATH", "PATH",
+            "HOME", "XDG_CONFIG_HOME", "XDG_STATE_HOME", "XDG_DATA_HOME", "XDG_CACHE_HOME", "XDG_CURRENT_DESKTOP"]
+    keys += sorted(k for k in os.environ if k.startswith("OMADEV_"))
+    target = Path(os.environ["OMADEV_ENV_FILE"])
+    tmp = target.with_suffix(".tmp")
+    tmp.write_text("".join(f"{k}={shlex.quote(os.environ[k])}\n" for k in keys if os.environ.get(k)))
+    tmp.replace(target)
+    # The Wayland backend creates its output before the config's monitor rule
+    # lands; a reload applies the WAYLAND-1 size.
+    subprocess.run(["hyprctl", "reload"], capture_output=True)
+    return 0
+
+
+# ---------------------------------------------------------------- list / focus / stop
+
+def slot_line(info: dict) -> str:
+    n = info["slot"]
+    if info["state"] == "free":
+        return f"{n}  free" + (f"      (config kept, see: omadev diff {n})" if info["home"] else "")
+    marks = f"  owner={info['owner']}" if info["owner"] else ""
+    return f"{n}  {info['state']:<12}{info['display']:<10} pid {info['pid']:<8} {info['omarchy_path']}{marks}"
+
+
+def cmd_list(args: list[str]) -> int:
+    if args and args[0] == "--json":
+        print(json.dumps([slot_json(n) for n in SLOTS], indent=2))
+        return 0
+    infos = [slot_json(n) for n in SLOTS]
+    for info in infos:
+        print(slot_line(info))
+    states = [info["state"] for info in infos]
+    if "unreachable" in states:
+        print(f"(unreachable: a session record exists but its compositor socket under {RUNTIME_DIR}/hypr "
+              "cannot be reached from this environment, e.g. an agent sandbox; run omadev from the host session)")
+    elif "running" not in states:
+        print("(no nested session running; start one with: omadev start)")
+    return 0
+
+
+def notify(msg: str) -> None:
+    if shutil.which("omarchy-notification-send"):
+        subprocess.run(["omarchy-notification-send", "-u", "low", msg], capture_output=True)
+    print(f"omadev: {msg}", file=sys.stderr)
+
+
+def focused_slot() -> int | None:
+    """The slot whose window the host compositor has focused, if any."""
+    active = json.loads(subprocess.run(["hyprctl", "activewindow", "-j"], capture_output=True, text=True).stdout or "{}")
+    pid = str(active.get("pid", ""))
+    return next((n for n in SLOTS if slot_alive(n) and read_env(n).get("OMADEV_PID") == pid), None)
+
+
+def cmd_focus(args: list[str]) -> int:
+    # Capture routes the user's keyboard into a nest. Only the user's own
+    # binding and the bar widget set this; an agent driving a nest never
+    # needs it and must not take the keyboard away from the user.
+    if os.environ.get("OMADEV_ALLOW_CAPTURE") != "1":
+        die("key capture is for the user at the keyboard (Super+Shift+Alt+D or the bar panel), not for "
+            "scripts or agents: drive the nest with `omadev run N ...` and `omadev hyprctl N dispatch ...`")
+    if args and is_slot(args[0]):
+        slot = int(args[0])
+    else:
+        # No slot: capture keys for the session window that already has focus.
+        slot = focused_slot()
+        if slot is None:
+            notify("Focus an omadev session window first")
+            return 1
+    if not slot_alive(slot):
+        notify(f"No nested Omarchy in slot {slot}")
+        return 1
+    env = read_env(slot)
+    ctl = ["hyprctl", "-i", env["OMADEV_HOST_SIG"]] if env.get("OMADEV_HOST_SIG") else ["hyprctl"]
+    # Every nest window is titled "aquamarine - WAYLAND-1"; the compositor PID
+    # tells them apart. Resolve it to the address selector Omarchy itself uses.
+    clients = json.loads(subprocess.run([*ctl, "clients", "-j"], capture_output=True, text=True).stdout or "[]")
+    address = next((c["address"] for c in clients if str(c.get("pid")) == env["OMADEV_PID"]), None)
+    if not address:
+        notify(f"Nested Omarchy {slot} has no window on the host yet")
+        return 1
+    subprocess.run([*ctl, "dispatch", f'hl.dsp.focus({{ window = "address:{address}" }})'], capture_output=True)
+    # Only capture keys if the window really took focus; a locked host ignores
+    # focus requests, and entering the submap then would strand the host.
+    active = json.loads(subprocess.run([*ctl, "activewindow", "-j"], capture_output=True, text=True).stdout or "{}")
+    if active.get("address") != address:
+        notify(f"Could not focus nested Omarchy {slot} (host locked?)")
+        return 1
+    subprocess.run([*ctl, "dispatch", 'hl.dsp.submap("nested")'], capture_output=True)
+    return 0
+
+
+def stop_one(slot: int, kill: bool) -> bool:
+    env = nest_env(slot)
+    pid = int(env["OMADEV_PID"])
+    (RUN_DIR / str(slot) / "stopping").touch()
+    subprocess.run(["hyprctl", "dispatch", "hl.dsp.exit()"], env=env, capture_output=True)
+    print(f"stopping nest {slot}", flush=True)
+    gone = wait_until(lambda: not slot_alive(slot), 15)
+    if not gone and kill:
+        os.kill(pid, signal.SIGTERM)
+        gone = wait_until(lambda: not slot_alive(slot), 5)
+    if not gone:
+        print(f"omadev: nest {slot} is still running (pid {pid}); try: omadev stop {slot} --kill", file=sys.stderr)
+        return False
+    (RUN_DIR / str(slot) / "stopping").unlink(missing_ok=True)
+    print(f"nest {slot} stopped")
+    return True
+
+
+def cmd_stop(args: list[str]) -> int:
+    kill = "--kill" in args
+    rest = [a for a in args if a != "--kill"]
+    if rest and rest[0] == "all":
+        return 0 if all([stop_one(n, kill) for n in SLOTS if slot_alive(n)]) else 1
+    return 0 if stop_one(pick_slot(rest[0] if rest else None), kill) else 1
+
+
+# ---------------------------------------------------------------- log / screenshot / passthrough
+
+def cmd_log(args: list[str]) -> int:
+    slot, rest = split_slot(args)
+    follow, show_all = "-f" in rest, "--all" in rest
+    env = read_env(slot)
+    started = int(env_file(slot).stat().st_mtime) if env_file(slot).is_file() else int(time.time())
+    # Header on stderr so it stays visible when the output is piped or followed.
+    print(f"# nest {slot}  display {env.get('WAYLAND_DISPLAY', '')}  OMARCHY_PATH {env.get('OMARCHY_PATH', '')}\n"
+          f"# shell and app output only; compositor log: {RUNTIME_DIR}/hypr/{env.get('HYPRLAND_INSTANCE_SIGNATURE', '?')}/hyprland.log\n"
+          f"# launcher output: {RUN_DIR / str(slot) / 'launcher.log'}"
+          + ("" if show_all else "\n# known-benign portal/polkit/at-spi lines hidden; --all shows them"), file=sys.stderr, flush=True)
+    cmd = ["journalctl", "--user", "-t", f"omadev-{slot}", "-o", "short-iso", "--no-pager", "--since", f"@{started - 5}"]
+    proc = subprocess.Popen(cmd + (["-f"] if follow else []), stdout=subprocess.PIPE, text=True)
+    try:
+        for line in proc.stdout:
+            if show_all or not NOISE.search(line):
+                print(line, end="", flush=True)
+    except (KeyboardInterrupt, BrokenPipeError):
+        proc.terminate()
+    return proc.wait()
+
+
+def cmd_screenshot(args: list[str]) -> int:
+    slot, rest = split_slot(args)
+    file = rest[0] if rest else str(RUN_DIR / str(slot) / f"screenshot-{time.strftime('%H%M%S')}.png")
+    try:
+        subprocess.run(["grim", file], env=nest_env(slot), timeout=15, check=True)
+    except (subprocess.TimeoutExpired, subprocess.CalledProcessError, FileNotFoundError):
+        die("grim failed (the host must be presenting the nest's window)")
+    print(file)
+    return 0
+
+
+def cmd_exec(prefix: list[str]):
+    def run(args: list[str]) -> int:
+        slot, rest = split_slot(args)
+        argv = [*prefix, *rest] or die("nothing to run")
+        os.execvpe(argv[0], argv, nest_env(slot))
+    return run
+
+
+COMMANDS = {
+    "start": cmd_start, "ensure": cmd_ensure, "list": cmd_list, "focus": cmd_focus,
+    "run": cmd_exec([]), "hyprctl": cmd_exec(["hyprctl"]), "shell": cmd_exec(["omarchy-shell"]),
+    "screenshot": cmd_screenshot, "log": cmd_log, "diff": cmd_diff, "stop": cmd_stop, "clean": cmd_clean,
+    "_publish": cmd_publish,
+}
+
+
+def main(argv: list[str]) -> int:
+    if not argv or argv[0].startswith("-") or is_slot(argv[0]):
+        argv = ["start", *argv]
+    if argv[0] in ("help", "-h", "--help"):
+        print(USAGE, end="")
+        return 0
+    handler = COMMANDS.get(argv[0]) or die(f"unknown command: {argv[0]} (see --help)")
+    return handler(argv[1:])
+
+
+if __name__ == "__main__":
+    try:
+        sys.exit(main(sys.argv[1:]))
+    except Fail as exc:
+        print(f"omadev: {exc}", file=sys.stderr)
+        sys.exit(1)
+    except KeyboardInterrupt:
+        sys.exit(130)
