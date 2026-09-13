@@ -81,14 +81,18 @@ omadev list --json                              # all slots, owners, pids, paths
   fires the compositor's own bindings. To do what a SUPER binding would do,
   dispatch its action: `hyprctl N dispatch 'hl.dsp.focus({ workspace = "2" })'`.
   To open a widget's panel use its IPC: `shell N shell toggle <plugin-id> '{}'`.
-- `screenshot` blocks while the host is not showing the nest's window (another
-  workspace in front, or the lock screen): a nest that is not presented gets no
-  frame callbacks. That also stalls anything in the nest that needs frames to
-  progress, such as GUI tests that synthesize mouse drags (a `ctest` suite ran
-  11/12 unpresented, 12/12 presented). Builds and headless tests do not care.
-  Probe with `timeout 5 omadev screenshot N`; if it fails, ask the user to show
-  the `omadev` workspace, or run the test while they do. Do not switch the
-  user's workspace yourself.
+- A nest keeps rendering while the host is not showing its window (another
+  workspace in front): the host rule marks nest windows render-unfocused, so
+  screenshots and GUI tests work with the user on any workspace. Hidden nests
+  render at the host's `misc.render_unfocused_fps` (15 by default). Not verified
+  while the host is locked. Never switch the user's workspace to "help" a nest.
+- The nested compositor tiles windows like any Hyprland: a test window asking
+  for 800x180 gets the whole nest when it is alone. A GUI test that depends on
+  its window size (omareel's editor drag test) passes with another window open
+  in the nest, or with a float rule in the nest's Hyprland config.
+- Full build + test suites run fine inside a nest: `omadev run N bash -lc 'cd
+  ~/Work/<repo> && ./bin/build && ./bin/test'` (the nest's HOME links your
+  real ~/Work).
 - The nest's private bus does not activate portals or at-spi (the host owns
   those and the Hyprland portal crashes against a nested compositor), so
   portal-based file dialogs and screen sharing are unavailable inside a nest.

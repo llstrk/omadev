@@ -66,7 +66,8 @@ plugin id needs one `omarchy restart shell` before the bar picks it up.
 A new session's window opens on the host workspace named `omadev`, shared by
 all sessions, without switching to it or taking focus from what you were
 doing. The launcher installs a window rule for that into the running host
-compositor (class `aquamarine`, floating, no initial focus, silent workspace)
+compositor (class `aquamarine`, floating, no initial focus, silent workspace,
+render-unfocused so a hidden nest keeps getting frames)
 through `hyprctl eval`; nothing is written to your Hyprland config, and a
 host `hyprctl reload` drops the rule until the next start re-adds it. There the sessions are laid out as an even grid of
 floating windows, recomputed whenever one starts or stops (dwindle would keep
@@ -263,10 +264,11 @@ omadev hyprctl 3 dispatch 'hl.dsp.exec_cmd("ghostty")'        # compositor-level
   paths behind a dry-run flag while iterating.
 - Commands that touch systemd user units or the package system (`omarchy
   update`, `omarchy dev link`) act on the host. Do not run them in the nest.
-- Screenshots inside the nest only complete while the host actually shows the
-  window; `grim` blocks otherwise. The same holds for anything that needs frame
-  callbacks to progress, such as GUI tests that synthesize drags: build and run
-  them with the `omadev` workspace visible.
+- A nest whose window is on a workspace you are not looking at keeps
+  rendering, at the host's `misc.render_unfocused_fps` (15 by default): the
+  window rule the launcher installs marks nest windows render-unfocused, so
+  screenshots and GUI tests inside a hidden nest work. Whether that also holds
+  while the host is locked is not verified.
 - Every nest logs a few warnings because the host already owns the
   session-wide service: portal app-ID registration, the polkit agent, at-spi,
   and Quickshell's duplicate-IPC-handler notice for user plugins.

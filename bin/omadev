@@ -707,8 +707,11 @@ def host_dispatch(lua: str) -> None:
 # state (a host `hyprctl reload` resets it and the next start re-adds it): the
 # window opens on the omadev workspace, floating, without taking focus. The
 # launcher's own placement below stays as the fallback.
+# render_unfocused: the host keeps sending frame callbacks to a nest window that
+# is not on screen (another workspace in front), so the nest keeps rendering and
+# its clients keep progressing; without it a hidden nest freezes.
 HOST_RULE = ('if not _G.omadev_rule then _G.omadev_rule = hl.window_rule({ name = "omadev-nest", '
-             'match = { class = "aquamarine" }, no_initial_focus = true, float = true, '
+             'match = { class = "aquamarine" }, no_initial_focus = true, float = true, render_unfocused = true, '
              'workspace = "name:omadev silent" }) end')
 
 
