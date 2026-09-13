@@ -9,6 +9,10 @@ Because it is the same kernel and the same user, plugins in the nest see the
 real hardware: `/sys/class/power_supply`, RAPL power limits, the DDC i2c bus,
 hwmon, the system bus. Only the compositor and the session bus are separate.
 
+![Six omadev sessions tiled on the omadev workspace, each a full Omarchy with its own bar, one of them capturing keys](docs/sessions.jpg)
+
+*Six sessions on the `omadev` workspace, each a full Omarchy with its own bar; the middle one is capturing keys.*
+
 ## Install
 
 ```bash
