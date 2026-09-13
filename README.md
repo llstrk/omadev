@@ -141,7 +141,7 @@ OMADEV_ALLOW_CAPTURE=1 omadev focus 2   # focus nest 2 and capture keys (user-on
 Nested-only Hyprland config goes in `~/.config/hypr/omadev.lua`; it is loaded
 after your normal config, only in the nest.
 
-## Every nest has its own home
+## Every nest has its own home and runtime dir
 
 A nest never shares Omarchy config with the host or with other nests. Its
 home under `~/.local/state/omadev/N/home` is a directory of symlinks to the
@@ -163,6 +163,15 @@ the same tree is re-pointed into the clone, one pointing outside it (a
 `shell.json` from a dotfiles checkout) becomes a copy. The nest also gets its
 own `.bashrc`, which runs yours and then restores the nest's `OMARCHY_PATH`
 and PATH overlay, since Omarchy's shell bootstrap resets them.
+
+The nest's `XDG_RUNTIME_DIR` is private in the same way: `$XDG_RUNTIME_DIR/omadev-N`
+(short on purpose: Unix socket paths are capped at 107 bytes and the host
+compositor's control socket is reached through it), where the host's sockets and the directories that hold
+them (Wayland, PipeWire, PulseAudio, GnuPG and SSH agents, keyring, `hypr/`
+with every compositor's control sockets) are symlinks, and directories of plain
+files start empty. Per-session state such as a screen recorder's "already
+recording" file, dconf, or the quickshell instance list is therefore the
+nest's own: omareel on the host and omareel in a nest no longer see each other.
 
 ```bash
 omadev start 3 --detach --plugin ~/worktrees/dell-monitor-fix
@@ -201,6 +210,7 @@ omadev hyprctl 3 dispatch 'hl.dsp.exec_cmd("ghostty")'        # compositor-level
 | `OMARCHY_PATH` | the nest's own (`--path`) |
 | Compositor, Wayland socket, Hyprland instance | separate |
 | Session bus (notifications, tray, MPRIS) | private to the nest by default |
+| `XDG_RUNTIME_DIR` | private; host sockets (Wayland, PipeWire, agents, `hypr/`) linked in |
 | systemd user units, portals, fcitx5, polkit agent | host only |
 
 ## How it stays out of the host's way

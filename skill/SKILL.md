@@ -13,8 +13,8 @@ description: >
 `omadev` runs extra Omarchy sessions as windows inside the user's
 desktop. A nest is a real Hyprland plus a real omarchy-shell on the same
 kernel and user: sysfs, hwmon, i2c and the system bus are the real hardware.
-Only the compositor, the session bus, and the Omarchy config (a private
-reflink clone per nest) are separate. Source and README: the directory `omadev --help` lives in (`readlink -f $(command -v omadev)`).
+Only the compositor, the session bus, the runtime dir (private, with the host's
+sockets linked in) and the Omarchy config (a private reflink clone per nest) are separate. Source and README: the directory `omadev --help` lives in (`readlink -f $(command -v omadev)`).
 
 ## Rules
 

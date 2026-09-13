@@ -86,7 +86,9 @@ Start options:
 
 Every nest gets a private home: reflink clones of ~/.config/omarchy and ~/.local/state/omarchy
 plus empty browser profiles, and symlinks to everything else. shell.json, plugins, toggles and
-theme state of a nest never touch the host; `diff N` shows what it changed.
+theme state of a nest never touch the host; `diff N` shows what it changed. It also gets a private
+XDG_RUNTIME_DIR that shares the host's sockets (Wayland, PipeWire, agents) but not its per-session
+state, so a recorder or single-instance app inside the nest does not see the host's.
 
 Inside a nest: `omarchy restart shell` restarts only that nest's shell, `wtype` types into it,
 `hyprctl dispatch '<lua>'` drives its compositor. Host keys: Super+Alt+D opens the sessions panel,
@@ -383,6 +385,50 @@ def make_home(slot: int, reuse: bool, path: Path) -> Path:
     return sb
 
 
+# ---------------------------------------------------------------- private runtime dir
+
+ALWAYS_SHARED_RUNTIME = {"hypr", "omadev"}   # every compositor's control sockets; our own records
+
+
+def nest_runtime(slot: int) -> Path:
+    # Directly under the real runtime dir, with a short name: a Unix socket path
+    # is limited to 107 bytes, and the host compositor's control socket is
+    # reached through this directory as <here>/hypr/<63-char signature>/.socket.sock.
+    return RUNTIME_DIR / f"omadev-{slot}"
+
+
+def make_runtime(slot: int) -> Path:
+    """The nest's XDG_RUNTIME_DIR: a 0700 directory of its own beside the real
+    one's contents. Sockets, and directories that hold sockets, are the host's
+    services (Wayland, PipeWire, agents, keyring) and are linked in; directories
+    of plain files are per-session state (a recorder's "am I running", dconf,
+    quickshell instances) and start empty, so an app inside the nest never
+    sees the host's copy. Lock and other plain files are linked: they belong
+    to the sockets next to them."""
+    run = nest_runtime(slot)
+    shutil.rmtree(run, ignore_errors=True)
+    run.mkdir(parents=True, mode=0o700)
+    os.chmod(run, 0o700)
+    for entry in RUNTIME_DIR.iterdir():
+        if re.fullmatch(r"omadev-[1-9]", entry.name):
+            continue  # another nest's runtime dir
+        if entry.is_dir() and not entry.is_symlink() and entry.name not in ALWAYS_SHARED_RUNTIME:
+            try:
+                children = list(entry.iterdir())
+            except OSError:
+                continue
+            if not any(child.is_socket() for child in children):
+                continue
+            # A real directory with the sockets linked one by one: libpulse and
+            # friends insist on owning a 0700 directory, not a symlink to one.
+            (run / entry.name).mkdir(mode=0o700)
+            for child in children:
+                (run / entry.name / child.name).symlink_to(child)
+            continue
+        (run / entry.name).symlink_to(entry)
+    return run
+
+
 def plugin_id(plugin: Path) -> str:
     try:
         pid = json.loads((plugin / "manifest.json").read_text()).get("id")
@@ -423,7 +469,7 @@ def cmd_clean(args: list[str]) -> int:
     slots = list(SLOTS) if target == "all" else [int(target)] if is_slot(target) else die("clean needs a slot number 1-9 or all")
     for slot in slots:
         home, runtime = HOME_BASE / str(slot), RUN_DIR / str(slot)
-        if not home.is_dir() and not runtime.is_dir():
+        if not home.is_dir() and not runtime.is_dir() and not nest_runtime(slot).is_dir():
             continue
         if slot_health(slot) not in ("free", "dead"):
             die(f"nest {slot} is {slot_state(slot)}; stop it first")
@@ -433,6 +479,7 @@ def cmd_clean(args: list[str]) -> int:
         os.ftruncate(fd, 0)  # no launcher PID while we hold it
         try:
             shutil.rmtree(home, ignore_errors=True)
+            shutil.rmtree(nest_runtime(slot), ignore_errors=True)
             for entry in runtime.iterdir() if runtime.is_dir() else []:
                 if entry.name != "lock":  # the lock inode stays: others may have it open
                     shutil.rmtree(entry, ignore_errors=True) if entry.is_dir() and not entry.is_symlink() else entry.unlink(missing_ok=True)
@@ -581,7 +628,8 @@ def nest_environment(slot: int, ns: argparse.Namespace, path: Path, plugins: lis
         link_plugin(sb, plugin)
     env.update(OMADEV_HOME=str(sb), HOME=str(sb), XDG_CONFIG_HOME=str(sb / ".config"),
                XDG_STATE_HOME=str(sb / ".local/state"), XDG_DATA_HOME=str(sb / ".local/share"),
-               XDG_CACHE_HOME=str(sb / ".cache"))
+               XDG_CACHE_HOME=str(sb / ".cache"), XDG_RUNTIME_DIR=str(make_runtime(slot)),
+               OMADEV_HOST_RUNTIME=str(RUNTIME_DIR))
     env.update(
         OMARCHY_PATH=str(path),
         OMADEV_OWNER=ns.owner,
@@ -983,7 +1031,8 @@ def cmd_publish(_args: list[str]) -> int:
     lock = RUNTIME_DIR / "hypr" / os.environ.get("HYPRLAND_INSTANCE_SIGNATURE", "") / "hyprland.lock"
     os.environ["OMADEV_PID"] = lock.read_text().split("\n", 1)[0].strip()
     keys = ["WAYLAND_DISPLAY", "DISPLAY", "HYPRLAND_INSTANCE_SIGNATURE", "DBUS_SESSION_BUS_ADDRESS", "OMARCHY_PATH", "PATH",
-            "HOME", "XDG_CONFIG_HOME", "XDG_STATE_HOME", "XDG_DATA_HOME", "XDG_CACHE_HOME", "XDG_CURRENT_DESKTOP"]
+            "HOME", "XDG_CONFIG_HOME", "XDG_STATE_HOME", "XDG_DATA_HOME", "XDG_CACHE_HOME", "XDG_RUNTIME_DIR",
+            "XDG_CURRENT_DESKTOP"]
     keys += sorted(k for k in os.environ if k.startswith("OMADEV_"))
     target = Path(os.environ["OMADEV_ENV_FILE"])
     tmp = target.with_suffix(".tmp")
@@ -1137,7 +1186,7 @@ def cmd_log(args: list[str]) -> int:
     started = int(env_file(slot).stat().st_mtime) if env_file(slot).is_file() else int(time.time())
     # Header on stderr so it stays visible when the output is piped or followed.
     print(f"# nest {slot}  display {env.get('WAYLAND_DISPLAY', '')}  OMARCHY_PATH {env.get('OMARCHY_PATH', '')}\n"
-          f"# shell and app output only; compositor log: {RUNTIME_DIR}/hypr/{env.get('HYPRLAND_INSTANCE_SIGNATURE', '?')}/hyprland.log\n"
+          f"# shell and app output only; compositor log: {env.get('XDG_RUNTIME_DIR', RUNTIME_DIR)}/hypr/{env.get('HYPRLAND_INSTANCE_SIGNATURE', '?')}/hyprland.log\n"
           f"# launcher output: {RUN_DIR / str(slot) / 'launcher.log'}"
           + ("" if show_all else "\n# known-benign portal/polkit/at-spi lines hidden; --all shows them"), file=sys.stderr, flush=True)
     cmd = ["journalctl", "--user", "-t", f"omadev-{slot}", "-o", "short-iso", "--no-pager", "--since", f"@{started - 5}"]
