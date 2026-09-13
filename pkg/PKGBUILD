@@ -18,7 +18,7 @@ depends=(
 )
 optdepends=('wtype: type into a session from the command line')
 source=("$pkgname-$pkgver.tar.gz::$url/archive/refs/tags/v$pkgver.tar.gz")
-sha256sums=('SKIP')
+sha256sums=('d5911e46cb797fcd3f621b686c023219e1155c41d45832ea8da0fe8fdcfdb489')
 
 package() {
   cd "$pkgname-$pkgver"
