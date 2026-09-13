@@ -765,7 +765,8 @@ def regrid_locked() -> None:
         row, col = divmod(i, cols)
         in_row = min(cols, len(windows) - row * cols)  # a short last row gets wider cells
         cell_w = width / in_row
-        w, h = int(cell_w - gap), int(cell_h - gap)
+        # Even sizes: H.264 encoders (screen recorders inside the nest) refuse odd frames.
+        w, h = int(cell_w - gap) & ~1, int(cell_h - gap) & ~1
         x, y = int(x0 + col * cell_w), int(y0 + row * cell_h)
         sel = f'window = "address:{c["address"]}"'
         if not c.get("floating"):
