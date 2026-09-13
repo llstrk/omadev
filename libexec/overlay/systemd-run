@@ -4,7 +4,7 @@
 # with the host session's environment: the browser would open on the host
 # desktop with the host's profile. Run the command here instead, in the nest
 # and in the nest's process group, so stopping the nest ends it too.
-# Honoured: --setenv/-E, --working-directory/-d, and the foreground forms
+# Honoured: --setenv/-E, --working-directory, --same-dir/-d, and the foreground forms
 # (--scope, --wait, --pipe, -P, --pty, -t). Timers, other users, other hosts
 # and machines cannot be emulated and are refused.
 foreground=0
@@ -16,7 +16,8 @@ while (($#)); do
     --scope|--wait|--pipe|-P|--pty|-t) foreground=1; shift ;;
     -E|--setenv) setenv+=("$2"); shift 2 ;;
     --setenv=*) setenv+=("${1#*=}"); shift ;;
-    -d|--working-directory) workdir=$2; shift 2 ;;
+    --working-directory) workdir=$2; shift 2 ;;
+    -d|--same-dir) workdir=$PWD; shift ;;
     --working-directory=*) workdir=${1#*=}; shift ;;
     --on-*|--timer-property*|--uid*|--gid*|-H|--host*|-M|--machine*)
       echo "systemd-run (omadev nest): $1 cannot be emulated inside a nested session" >&2; exit 1 ;;
@@ -27,7 +28,9 @@ while (($#)); do
 done
 (($#)) || exit 0
 for kv in "${setenv[@]}"; do export "$kv"; done
-[[ -n $workdir ]] && cd "$workdir"
+if [[ -n $workdir ]] && ! cd "$workdir"; then
+  echo "systemd-run (omadev nest): cannot change to $workdir" >&2; exit 1
+fi
 if (( foreground )); then
   exec "$@"
 fi

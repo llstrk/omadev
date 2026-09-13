@@ -99,7 +99,10 @@ the widget offers no capture over IPC, so a script or agent cannot take your
 keyboard. Ctrl-C in the launching terminal or `omadev stop N` ends a
 nest; `omadev stop all` ends every nest. `stop` waits until the slot
 is free (up to 15 s; `--kill` then sends SIGTERM to a compositor that ignores
-the exit request) and returns once the slot can be started again. `list` shows
+the exit request) and returns once the slot can be started again. Stopping
+ends everything that carries the nest's environment, including apps that
+detached from the compositor and commands started with `omadev run`; a nest
+that is still starting can be stopped too. `list` shows
 a nest as `starting` until it has published its record and as `stopping` on
 the way out. Each slot's launcher.log stays under the runtime directory for
 post-mortems.
@@ -154,7 +157,12 @@ real home, except:
   linked profile a browser started in the nest would just open a window in
   the one already running on the host.
 
-Everything else, projects, keys, app configs, is the real file.
+Everything else, projects, keys, app configs, is the real file. Symlinks
+inside the two cloned trees are kept private too: one pointing elsewhere in
+the same tree is re-pointed into the clone, one pointing outside it (a
+`shell.json` from a dotfiles checkout) becomes a copy. The nest also gets its
+own `.bashrc`, which runs yours and then restores the nest's `OMARCHY_PATH`
+and PATH overlay, since Omarchy's shell bootstrap resets them.
 
 ```bash
 omadev start 3 --detach --plugin ~/worktrees/dell-monitor-fix

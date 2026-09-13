@@ -292,13 +292,68 @@ def link_entries(src: Path, dst: Path, skip: set[str]) -> None:
 BROWSER_PROFILES = ("chromium", "google-chrome", "BraveSoftware", "microsoft-edge", "vivaldi")
 
 
-def make_home(slot: int, reuse: bool) -> Path:
+def privatize_links(clone: Path, origin: Path) -> None:
+    """Symlinks inside a cloned tree: one that resolves into the origin tree is
+    re-pointed to the same place in the clone (current/theme and the like keep
+    working), one that resolves elsewhere becomes a copy (a shell.json or plugin
+    linked from a dotfiles checkout must not be written through), one that
+    resolves inside the clone or nowhere is left alone. Copies may bring links
+    of their own, hence the passes."""
+    for _ in range(3):
+        changed = False
+        for dirpath, dirnames, filenames in os.walk(clone):
+            for name in dirnames + filenames:
+                link = Path(dirpath) / name
+                if not link.is_symlink():
+                    continue
+                target = Path(os.path.realpath(link))
+                if not target.exists() or target.is_relative_to(clone):
+                    continue
+                if target.is_relative_to(origin):
+                    link.unlink()
+                    link.symlink_to(clone / target.relative_to(origin))
+                else:
+                    link.unlink()
+                    subprocess.run(["cp", "-a", "--reflink=auto", str(target), str(link)], check=True)
+                changed = True
+        if not changed:
+            return
+
+
+def write_bashrc(sb: Path, real: Path, path: Path) -> None:
+    """Omarchy's env-bootstrap, sourced by every bash, resets OMARCHY_PATH to the
+    packaged tree when /etc/omarchy.conf is absent; a nest running a checkout
+    would lose it in any terminal or `bash -lc`. The nest's own .bashrc runs
+    the real one, then restores the nest's values."""
+    q = shlex.quote
+    rc = ["# omadev: the real .bashrc, then this nest's Omarchy tree and PATH overlay.",
+          '[ -n "$OMADEV_BASHRC" ] && return; OMADEV_BASHRC=1',
+          f"[ -r {q(str(real / '.bashrc'))} ] && . {q(str(real / '.bashrc'))}",
+          f"export OMARCHY_PATH={q(str(path))}",
+          f'case ":$PATH:" in *:{q(str(ROOT / "overlay"))}:*) ;; *) PATH={q(str(ROOT / "overlay"))}:$PATH ;; esac',
+          "export PATH", ""]
+    # Login shells (terminals, `bash -lc`) read .bash_profile: the real one if
+    # there is one (it normally sources ~/.bashrc, which is now ours), else .profile,
+    # and then ours in any case; the guard above keeps it from running twice.
+    profile = ["# omadev: the real login profile, then this nest's .bashrc.",
+               f"if [ -r {q(str(real / '.bash_profile'))} ]; then . {q(str(real / '.bash_profile'))}; "
+               f"elif [ -r {q(str(real / '.profile'))} ]; then . {q(str(real / '.profile'))}; fi",
+               '[ -r "$HOME/.bashrc" ] && . "$HOME/.bashrc"', ""]
+    for name, lines in ((".bashrc", rc), (".bash_profile", profile)):
+        f = sb / name
+        if f.is_symlink() or f.exists():
+            f.unlink()
+        f.write_text("\n".join(lines))
+
+
+def make_home(slot: int, reuse: bool, path: Path) -> Path:
     """The nest's private home: symlinks to the real one, except
     ~/.config/omarchy and ~/.local/state/omarchy, which are reflink clones the
     nest owns, and browser profiles, which start empty."""
     real = Path.home()
     sb = HOME_BASE / str(slot) / "home"
     if sb.is_dir() and reuse:
+        write_bashrc(sb, real, path)
         return sb
     shutil.rmtree(sb, ignore_errors=True)
     (sb / ".config").mkdir(parents=True)
@@ -320,13 +375,8 @@ def make_home(slot: int, reuse: bool) -> Path:
             subprocess.run(["cp", "-a", "-H", "--reflink=auto", str(real / rel), str(sb / rel)], check=True)
         else:
             (sb / rel).mkdir()
-        # A subdirectory that is itself a symlink (plugins -> dotfiles) would
-        # let the nest write through to the host; make it a directory of its own.
-        for entry in (sb / rel).iterdir():
-            if entry.is_symlink() and entry.is_dir():
-                target = os.path.realpath(entry)
-                entry.unlink()
-                subprocess.run(["cp", "-a", "--reflink=auto", target, str(entry)], check=True)
+        privatize_links(sb / rel, Path(os.path.realpath(real / rel)))
+    write_bashrc(sb, real, path)
     # The shell replays persisted popups at start; the nest begins with none.
     shutil.rmtree(sb / ".local/state/omarchy/notifications", ignore_errors=True)
     (sb / ".local/state/omarchy/notifications").mkdir()
@@ -380,6 +430,7 @@ def cmd_clean(args: list[str]) -> int:
         fd = acquire_lock(slot)  # a launcher that is still starting this slot holds it
         if fd is None:
             die(f"nest {slot} is being started; stop it first")
+        os.ftruncate(fd, 0)  # no launcher PID while we hold it
         try:
             shutil.rmtree(home, ignore_errors=True)
             for entry in runtime.iterdir() if runtime.is_dir() else []:
@@ -471,13 +522,16 @@ def hold_lock_as_launcher() -> None:
 
 
 def lock_holder(slot: int) -> int | None:
-    """PID of the launcher holding the slot, if the slot is locked."""
+    """PID of the launcher holding the slot, if the slot is locked and the
+    recorded PID really is an omadev launcher (never a reused PID)."""
     if not slot_locked(slot):
         return None
     try:
-        return int(lock_file(slot).read_text().strip() or 0) or None
+        pid = int(lock_file(slot).read_text().strip() or 0)
+        argv = Path(f"/proc/{pid}/cmdline").read_bytes().split(b"\0")
     except (OSError, ValueError):
         return None
+    return pid if any(a.endswith(b"/omadev") or a == b"omadev" for a in argv[:2]) and b"start" in argv else None
 
 
 def slot_locked(slot: int) -> bool:
@@ -509,18 +563,20 @@ def choose_slot(requested: str | None) -> int:
         HELD_LOCK = acquire_lock(int(requested))
         if HELD_LOCK is None:
             die(f"nest {requested} is being started by another process")
+        hold_lock_as_launcher()
         return int(requested)
     for n in SLOTS:
         if slot_health(n) in ("free", "dead"):
             HELD_LOCK = acquire_lock(n)
             if HELD_LOCK is not None:
+                hold_lock_as_launcher()
                 return n
     die("all nine slots are running, being started, or unreachable from here")
 
 
 def nest_environment(slot: int, ns: argparse.Namespace, path: Path, plugins: list[Path]) -> dict[str, str]:
     env = dict(os.environ)
-    sb = make_home(slot, ns.reuse)
+    sb = make_home(slot, ns.reuse, path)
     for plugin in plugins:
         link_plugin(sb, plugin)
     env.update(OMADEV_HOME=str(sb), HOME=str(sb), XDG_CONFIG_HOME=str(sb / ".config"),
@@ -758,20 +814,60 @@ def sweep_group(child: subprocess.Popen) -> None:
             return
 
 
+def nest_processes(slot: int) -> list[int]:
+    """PIDs (ours, not this one) whose environment says they belong to nest `slot`:
+    apps that left the compositor's process group through setsid or were started
+    with `omadev run`."""
+    marker = f"OMADEV_SLOT={slot}".encode()
+    found = []
+    for entry in os.scandir("/proc"):
+        if not entry.name.isdigit() or int(entry.name) == os.getpid():
+            continue
+        try:
+            if marker in Path(entry.path, "environ").read_bytes().split(b"\0"):
+                found.append(int(entry.name))
+        except OSError:
+            continue
+    return found
+
+
+def sweep_nest(slot: int) -> None:
+    for sig, grace in ((signal.SIGTERM, 3), (signal.SIGKILL, 2)):
+        pids = nest_processes(slot)
+        if not pids:
+            return
+        for pid in pids:
+            with contextlib.suppress(ProcessLookupError):
+                os.kill(pid, sig)
+        deadline = time.time() + grace
+        while time.time() < deadline and nest_processes(slot):
+            time.sleep(0.1)
+
+
 def run_foreground(slot: int, env: dict[str, str], extra: list[str]) -> int:
     hold_lock_as_launcher()
-    child = launch_compositor(slot, env, extra)
+    child: subprocess.Popen | None = None
+    cancelled = False
 
     def interrupt(*_):
         # Ctrl-C / SIGTERM: the whole tree, not just dbus-run-session (which
-        # would exit and leave Hyprland running without a record).
-        with contextlib.suppress(ProcessLookupError):
-            os.killpg(child.pid, signal.SIGTERM)
+        # would exit and leave Hyprland running without a record). Installed
+        # before the first launch so no window is left uncovered.
+        nonlocal cancelled
+        cancelled = True
+        if child is not None:
+            with contextlib.suppress(ProcessLookupError):
+                os.killpg(child.pid, signal.SIGTERM)
 
     for sig in (signal.SIGINT, signal.SIGTERM):
         signal.signal(sig, interrupt)
     try:
         for attempt in range(1, START_ATTEMPTS + 1):
+            if cancelled:
+                return 130
+            child = launch_compositor(slot, env, extra)
+            if cancelled:
+                interrupt()
             if wait_until(lambda: env_file(slot).is_file() or child.poll() is not None, STALL_SECONDS):
                 break
             # The nested compositor sometimes stalls in its handshake with the
@@ -780,17 +876,19 @@ def run_foreground(slot: int, env: dict[str, str], extra: list[str]) -> int:
             print(f"omadev: nest {slot} did not come up within {STALL_SECONDS} s (compositor stalled); "
                   f"attempt {attempt} of {START_ATTEMPTS}", flush=True)
             end_compositor(child)
+            env_file(slot).unlink(missing_ok=True)  # a record published just too late belongs to this dead attempt
             if attempt == START_ATTEMPTS:
                 print(f"omadev: giving up on nest {slot}", flush=True)
                 return 1
-            child = launch_compositor(slot, env, extra)
         host_refresh()
         watch_window(slot, child, env)
         return child.returncode
     finally:
-        if child.poll() is None:
-            end_compositor(child)
-        sweep_group(child)
+        if child is not None:
+            if child.poll() is None:
+                end_compositor(child)
+            sweep_group(child)
+        sweep_nest(slot)
         env_file(slot).unlink(missing_ok=True)
         (RUN_DIR / str(slot) / "stopping").unlink(missing_ok=True)
         if env.get("OMADEV_PLACE", "workspace") == "workspace":
@@ -861,8 +959,9 @@ def cmd_ensure(argv: list[str]) -> int:
         ns, env = parse_start(rest), read_env(slot)
         if env.get("OMARCHY_PATH") != os.path.realpath(ns.path):
             die(f"nest {slot} is running {env.get('OMARCHY_PATH')}, not {os.path.realpath(ns.path)}; stop it first")
-        if ns.owner and env.get("OMADEV_OWNER", "") != ns.owner:
-            die(f"nest {slot} belongs to {env.get('OMADEV_OWNER') or 'the user'}, not {ns.owner}; pick another slot")
+        if env.get("OMADEV_OWNER", "") != ns.owner:
+            die(f"nest {slot} belongs to {env.get('OMADEV_OWNER') or 'the user'}, not {ns.owner or 'an unnamed caller'}; "
+                "pass its --owner or pick another slot")
         for plugin in ns.plugin:  # links into the live nest home; the nested shell hot-reloads
             link_plugin(Path(env["OMADEV_HOME"]), Path(os.path.realpath(plugin)))
         if not shell_ping(slot):
@@ -980,7 +1079,10 @@ def stop_starting(slot: int) -> bool:
     (its signal handler takes the compositor tree down) and wait for the slot."""
     holder = lock_holder(slot)
     if holder is None:
-        return not slot_locked(slot)
+        if slot_locked(slot):
+            print(f"omadev: nest {slot} is held by something other than a launcher (clean?); try again", file=sys.stderr)
+            return False
+        return True
     print(f"stopping nest {slot} (still starting, launcher pid {holder})", flush=True)
     with contextlib.suppress(ProcessLookupError):
         os.kill(holder, signal.SIGTERM)
