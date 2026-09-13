@@ -81,8 +81,14 @@ omadev list --json                              # all slots, owners, pids, paths
   fires the compositor's own bindings. To do what a SUPER binding would do,
   dispatch its action: `hyprctl N dispatch 'hl.dsp.focus({ workspace = "2" })'`.
   To open a widget's panel use its IPC: `shell N shell toggle <plugin-id> '{}'`.
-- `screenshot` works even while the host is locked. If it ever blocks, the
-  nest has not rendered a frame yet; retry after a second.
+- `screenshot` blocks while the host is not showing the nest's window (another
+  workspace in front, or the lock screen): a nest that is not presented gets no
+  frame callbacks. That also stalls anything in the nest that needs frames to
+  progress, such as GUI tests that synthesize mouse drags (a `ctest` suite ran
+  11/12 unpresented, 12/12 presented). Builds and headless tests do not care.
+  Probe with `timeout 5 omadev screenshot N`; if it fails, ask the user to show
+  the `omadev` workspace, or run the test while they do. Do not switch the
+  user's workspace yourself.
 - The nest's private bus does not activate portals or at-spi (the host owns
   those and the Hyprland portal crashes against a nested compositor), so
   portal-based file dialogs and screen sharing are unavailable inside a nest.

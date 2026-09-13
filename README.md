@@ -264,7 +264,9 @@ omadev hyprctl 3 dispatch 'hl.dsp.exec_cmd("ghostty")'        # compositor-level
 - Commands that touch systemd user units or the package system (`omarchy
   update`, `omarchy dev link`) act on the host. Do not run them in the nest.
 - Screenshots inside the nest only complete while the host actually shows the
-  window; `grim` blocks otherwise.
+  window; `grim` blocks otherwise. The same holds for anything that needs frame
+  callbacks to progress, such as GUI tests that synthesize drags: build and run
+  them with the `omadev` workspace visible.
 - Every nest logs a few warnings because the host already owns the
   session-wide service: portal app-ID registration, the polkit agent, at-spi,
   and Quickshell's duplicate-IPC-handler notice for user plugins.
