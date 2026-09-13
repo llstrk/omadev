@@ -2,7 +2,7 @@
   "schemaVersion": 1,
   "id": "dry.omadev",
   "name": "Omadev",
-  "version": "0.1.0",
+  "version": "0.2.0",
   "author": "dry",
   "license": "MIT",
   "description": "On the host: the running omadev sessions as buttons (click to focus and capture keys; click the icon to start one). Inside a session: whether the host is passing keys here, click to take or release them.",

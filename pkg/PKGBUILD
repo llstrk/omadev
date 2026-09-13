@@ -1,7 +1,7 @@
 # Maintainer: Dennis Rye <dryerr@gmail.com>
 
 pkgname=omadev
-pkgver=0.1.0
+pkgver=0.2.0
 pkgrel=1
 pkgdesc='Run Omarchy sessions as windows inside the current one, for plugin development and agents (slots 1-9)'
 arch=('any')
@@ -18,7 +18,7 @@ depends=(
 )
 optdepends=('wtype: type into a session from the command line')
 source=("$pkgname-$pkgver.tar.gz::$url/archive/refs/tags/v$pkgver.tar.gz")
-sha256sums=('d5911e46cb797fcd3f621b686c023219e1155c41d45832ea8da0fe8fdcfdb489')
+sha256sums=('SKIP')
 
 package() {
   cd "$pkgname-$pkgver"
