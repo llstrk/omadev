@@ -1,0 +1,40 @@
+#!/bin/bash
+# Nested stand-in for systemd-run. Omarchy's launchers (omarchy-launch-browser,
+# menu share) hand their command to the host's user manager, which spawns it
+# with the host session's environment: the browser would open on the host
+# desktop with the host's profile. Run the command here instead, in the nest
+# and in the nest's process group, so stopping the nest ends it too.
+# Honoured: --setenv/-E, --working-directory/-d, and the foreground forms
+# (--scope, --wait, --pipe, -P, --pty, -t). Timers, other users, other hosts
+# and machines cannot be emulated and are refused.
+foreground=0
+declare -a setenv=()
+workdir=""
+while (($#)); do
+  case $1 in
+    --) shift; break ;;
+    --scope|--wait|--pipe|-P|--pty|-t) foreground=1; shift ;;
+    -E|--setenv) setenv+=("$2"); shift 2 ;;
+    --setenv=*) setenv+=("${1#*=}"); shift ;;
+    -d|--working-directory) workdir=$2; shift 2 ;;
+    --working-directory=*) workdir=${1#*=}; shift ;;
+    --on-*|--timer-property*|--uid*|--gid*|-H|--host*|-M|--machine*)
+      echo "systemd-run (omadev nest): $1 cannot be emulated inside a nested session" >&2; exit 1 ;;
+    -p|--property|-u|--unit|--description|--slice|--nice|--service-type|--path-property|--socket-property) shift 2 ;;
+    -*) shift ;;
+    *) break ;;
+  esac
+done
+(($#)) || exit 0
+for kv in "${setenv[@]}"; do export "$kv"; done
+[[ -n $workdir ]] && cd "$workdir"
+if (( foreground )); then
+  exec "$@"
+fi
+# Background in the same process group (no setsid): the launcher sweeps the
+# nest's group on stop, and this must go with it.
+if command -v systemd-cat >/dev/null; then
+  ( exec systemd-cat -t "omadev-${OMADEV_SLOT:-x}" -- "$@" </dev/null >/dev/null 2>&1 & )
+else
+  ( exec "$@" </dev/null >/dev/null 2>&1 & )
+fi

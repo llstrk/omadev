@@ -40,8 +40,7 @@ end)
 The bar widget `dry.omadev` (in `plugin/`) is the visual side. It must be a
 real directory under `~/.config/omarchy/plugins`: the shell watches that tree
 with `inotifywait -r`, which does not descend into symlinked directories, so a
-symlinked plugin never hot-reloads. (In this checkout `plugin/dry.omadev` is a
-symlink the other way, to the live copy.) On the host it is one icon,
+symlinked plugin never hot-reloads, which is why the installer copies it. On the host it is one icon,
 lit while sessions run, that opens a panel of the open sessions: a row per
 session with focus-and-capture and stop actions, and a + button that
 starts a new session in the first free slot. The panel takes the keyboard:
@@ -68,7 +67,7 @@ floating windows, recomputed whenever one starts or stops (dwindle would keep
 halving whichever window was focused last). Press w in the sessions panel to go to that workspace,
 or jump to one session from its row or with `omadev focus N`; drag it back
 into a tiled layout whenever you like. `--place tile` (or `OMADEV_PLACE=tile`)
-leaves the window where the host's layout puts it instead.
+tiles the window on the workspace you were on when you started it instead.
 
 Closing a session's window on the host ends the session: the launcher watches
 for its window and asks the nested compositor to exit when it is gone, since
@@ -87,7 +86,7 @@ omadev log 2 -f                         # follow nest 2's shell and app output (
 ```
 
 `start` without `--detach` stays in the foreground for the life of the nest,
-like running Hyprland by hand; Ctrl-C ends it. Use `--detach` from scripts and
+like running Hyprland by hand; Ctrl-C ends it, compositor and all. Use `--detach` from scripts and
 agents. `omarchy nested ...` is not routed by the Omarchy CLI, which only
 discovers commands in its own bin directory; call `omadev` directly.
 
@@ -100,13 +99,15 @@ the widget offers no capture over IPC, so a script or agent cannot take your
 keyboard. Ctrl-C in the launching terminal or `omadev stop N` ends a
 nest; `omadev stop all` ends every nest. `stop` waits until the slot
 is free (up to 15 s; `--kill` then sends SIGTERM to a compositor that ignores
-the exit request). `list` shows a nest as `stopping` in between. Each slot's
-launcher.log stays under the runtime directory for post-mortems.
+the exit request) and returns once the slot can be started again. `list` shows
+a nest as `starting` until it has published its record and as `stopping` on
+the way out. Each slot's launcher.log stays under the runtime directory for
+post-mortems.
 
-Starting several nests at once is safe: a slot is claimed atomically (a lock
-file holding the launcher's PID) before anything is launched, so concurrent
-starts without a slot number get distinct slots and two starts of the same
-number leave one of them refused.
+Starting several nests at once is safe: the launcher holds a lock on the slot
+(a `flock`, released only when the launcher exits, so it is never stale) before
+anything is launched, so concurrent starts without a slot number get distinct
+slots and two starts of the same number leave one of them refused.
 
 The nested compositor occasionally stalls in its handshake with the host
 (its log stops while listing buffer formats, it never gets an output, and
@@ -130,7 +131,7 @@ omadev shell 2 shell listPlugins        # omarchy-shell IPC in nest 2
 omadev hyprctl 2 clients                # hyprctl against nest 2
 omadev hyprctl 2 dispatch 'hl.dsp.exec_cmd("ghostty")'
 omadev run 2 wtype "text"               # type into the focused app (compositor binds do not fire)
-omadev list --json                      # every nest's environment, owner, pid
+omadev list --json                      # every nest's environment, owner, pid; state free|starting|running|stopping|unreachable
 OMADEV_ALLOW_CAPTURE=1 omadev focus 2   # focus nest 2 and capture keys (user-only guard); no number: the focused nest
 ```
 
@@ -146,6 +147,8 @@ real home, except:
 - `~/.config/omarchy` and `~/.local/state/omarchy`, which are reflink clones
   (btrfs copy-on-write: instant, and no blocks of their own until a file is
   written). shell.json, plugins, themes and toggles in the nest are the nest's.
+  A config directory that is itself a symlink (a dotfiles checkout) is copied
+  as a directory, so the nest never writes through the link.
 - Chromium-family browser profiles (`~/.config/chromium` and friends), which
   start empty: those browsers are single-instance per profile, so through a
   linked profile a browser started in the nest would just open a window in
@@ -202,9 +205,10 @@ omadev hyprctl 3 dispatch 'hl.dsp.exec_cmd("ghostty")'        # compositor-level
   from the systemd environment and kills every quickshell running that config
   on any display, which is the host bar. `libexec/overlay/` shadows it with a
   version that only touches the nest's display.
-- **`uwsm-app`.** The real one hands commands to `wayland-wm-app-daemon`, which
-  spawns them with the host's environment, so SUPER+Return would open a
-  terminal on the host. The overlay runs the command directly instead.
+- **`uwsm-app` and `systemd-run`.** The real ones hand commands to
+  `wayland-wm-app-daemon` or the user's systemd manager, which spawn them with
+  the host's environment, so SUPER+Return would open a terminal on the host and
+  SUPER+B a browser. The overlays run the command directly in the nest instead.
 - **Idle and lock.** A small Quickshell "keeper" in each nest holds a Wayland
   idle inhibitor, so the nested shell never starts its screensaver or lock
   and never competes with the host lock for the fingerprint reader.
@@ -256,6 +260,6 @@ omadev hyprctl 3 dispatch 'hl.dsp.exec_cmd("ghostty")'        # compositor-level
 bin/omadev                 launcher and every control command (Python 3, standard library only);
                                    its hidden `_publish` runs inside the nest on start to record the environment
 libexec/hyprland.lua               nested Hyprland config (wraps your real hyprland.lua)
-libexec/overlay/                   PATH shims (bash, tiny exec wrappers): omarchy, omarchy-restart-shell, uwsm-app, systemd-cat
+libexec/overlay/                   PATH shims (bash, tiny exec wrappers): omarchy, omarchy-restart-shell, uwsm-app, systemd-run, systemd-cat
 libexec/keeper/shell.qml           per-nest helper: idle inhibitor + follow-the-window resize
 ```

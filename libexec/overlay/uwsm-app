@@ -22,8 +22,10 @@ if (( terminal )); then
     set -- "${TERMINAL:-alacritty}" -e "$@"
   fi
 fi
+# Background in the same process group (no setsid): the launcher sweeps the
+# nest's group on stop, and apps started here must go with it.
 if command -v systemd-cat >/dev/null; then
-  setsid -f -- systemd-cat -t "omadev-${OMADEV_SLOT:-x}" -- "$@" </dev/null
+  ( exec systemd-cat -t "omadev-${OMADEV_SLOT:-x}" -- "$@" </dev/null >/dev/null 2>&1 & )
 else
-  setsid -f -- "$@" </dev/null >/dev/null 2>&1
+  ( exec "$@" </dev/null >/dev/null 2>&1 & )
 fi

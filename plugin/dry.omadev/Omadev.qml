@@ -62,7 +62,8 @@ Panel {
   readonly property bool captured: passthrough && focused
 
   // Host face.
-  property var sessions: []          // running entries of `omadev list --json`
+  property var sessions: []          // non-free entries of `omadev list --json` (starting, running, stopping)
+  property int runningCount: 0
   property bool loaded: false
   property int selectedIndex: -1
   property bool cursorActive: false
@@ -156,7 +157,11 @@ Panel {
     }
     now = Date.now() / 1000
     loaded = true
-    if (list.length > sessions.length) retakeFocus = false  // the started session is up
+    var running = 0
+    for (var j = 0; j < list.length; j++)
+      if (list[j].state === "running") running++
+    if (running > runningCount) retakeFocus = false  // the started session is up (its window has mapped)
+    runningCount = running
     if (JSON.stringify(list) !== JSON.stringify(sessions)) sessions = list
     if (selectedIndex >= sessions.length) selectedIndex = sessions.length - 1
   }
@@ -180,11 +185,12 @@ Panel {
   }
 
   function sessionMeta(s) {
+    if (s.state === "starting") return "starting…"
     var parts = [shortPath(s.omarchy_path)]
     if (s.owner) parts.push(s.owner)
     var plugins = s.plugins ? Object.keys(s.plugins) : []
     if (plugins.length) parts.push(plugins.join(", "))
-    parts.push(s.state === "stopping" ? "stopping" : uptime(s))
+    parts.push(s.state === "stopping" ? "stopping" : (s.state === "starting" ? "starting" : uptime(s)))
     return parts.join(" · ")
   }
 
@@ -203,7 +209,7 @@ Panel {
   function stopSelected() {
     if (selectedIndex < 0 || selectedIndex >= sessions.length) return
     var s = sessions[selectedIndex]
-    if (s.state !== "stopping") stopSlot(s.slot)
+    if (s.state === "running") stopSlot(s.slot)
   }
 
   implicitWidth: nested ? nestButton.implicitWidth : button.implicitWidth
@@ -580,7 +586,7 @@ Panel {
     property var session: ({})
     property int rowIndex: 0
     readonly property string slotText: String(session.slot)
-    readonly property bool stopping: session.state === "stopping"
+    readonly property bool stopping: session.state === "stopping" || session.state === "starting"
 
     hasCursor: root.cursorActive && root.selectedIndex === rowIndex
     foreground: root.bar.foreground
@@ -621,7 +627,7 @@ Panel {
         Text {
           width: parent.width
           textFormat: Text.PlainText
-          text: "Session " + row.slotText + "  ·  " + (row.session.display || "")
+          text: "Session " + row.slotText + (row.session.display ? "  ·  " + row.session.display : "")
           color: root.bar.foreground
           opacity: row.stopping ? 0.5 : 1.0
           font.family: root.bar.fontFamily
@@ -651,7 +657,7 @@ Panel {
 
       PanelActionButton {
         iconText: "󰅖"
-        tooltipText: row.stopping ? "Stopping…" : "Stop session " + row.slotText + " (d)"
+        tooltipText: row.session.state === "starting" ? "Starting…" : (row.stopping ? "Stopping…" : "Stop session " + row.slotText + " (d)")
         enabled: !row.stopping
         foreground: root.bar.foreground
         hoverColor: root.bar ? root.bar.urgent : Color.urgent

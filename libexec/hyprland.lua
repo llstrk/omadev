@@ -54,7 +54,7 @@ hl.env("PATH", root .. "/overlay:" .. (os.getenv("PATH") or "/usr/local/bin:/usr
 
 hl.on("hyprland.start", function()
   hl.exec_cmd("omadev _publish")
-  hl.exec_cmd("quickshell -p " .. root .. "/keeper")
+  hl.exec_cmd("quickshell -p '" .. root .. "/keeper'")
   if os.getenv("OMADEV_NO_SHELL") ~= "1" then
     hl.exec_cmd("omarchy-launch-shell")
   end

@@ -23,7 +23,15 @@ ln -sfn "$src/bin/omadev" "$HOME/.local/bin/omadev"
 mkdir -p "$config/omarchy/plugins"
 rm -rf "$config/omarchy/plugins/dry.omadev"
 cp -r "$src/plugin/dry.omadev" "$config/omarchy/plugins/dry.omadev"
-omarchy plugin enable dry.omadev >/dev/null 2>&1 || true
+# The running shell learns about a new plugin only after a rescan, and the
+# rescan is asynchronous; give it a moment before enabling.
+enabled=0
+if omarchy-shell shell rescanPlugins >/dev/null 2>&1; then
+  for _ in 1 2 3 4 5 6 7 8 9 10; do
+    if omarchy plugin enable dry.omadev >/dev/null 2>&1; then enabled=1; break; fi
+    sleep 0.5
+  done
+fi
 
 # Host keys: Super+Alt+D opens the sessions panel, Super+Shift+Alt+D captures
 # or releases keys for the focused session.
@@ -48,5 +56,10 @@ for dir in "$HOME/.claude/skills" "$HOME/.codex/skills" "$HOME/.agents/skills"; 
   [[ -d $dir ]] && ln -sfn "$src/skill" "$dir/omadev"
 done
 
-echo "omadev installed. Restart the bar once so it loads the widget:  omarchy restart shell"
+if (( enabled )); then
+  echo "omadev installed. Restart the bar once so it loads the widget:  omarchy restart shell"
+else
+  echo "omadev installed, but the bar widget could not be enabled yet (is the shell running?)."
+  echo "Run:  omarchy restart shell && omarchy plugin enable dry.omadev"
+fi
 echo "Then: omadev start   (or Super+Alt+D, n)"

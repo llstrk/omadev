@@ -49,8 +49,10 @@ ShellRoot {
     stdout: StdioCollector {
       onStreamFinished: {
         try {
+          // hyprctl reports physical pixels, Quickshell logical ones: compare at the nest's scale.
           var m = JSON.parse(text)[0]
-          if (m && (m.width + "x" + m.height) !== root.size) rearm.restart()
+          var s = m && m.scale > 0 ? m.scale : 1
+          if (m && (Math.round(m.width / s) + "x" + Math.round(m.height / s)) !== root.size) rearm.restart()
         } catch (e) {}
       }
     }

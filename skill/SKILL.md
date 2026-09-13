@@ -19,7 +19,8 @@ reflink clone per nest) are separate. Source and README: the directory `omadev -
 ## Rules
 
 - Claim a slot with `ensure N --owner <your-name>`; every nest has its own copy of the
-  Omarchy config, so nothing you change in it reaches the host or other nests.
+  Omarchy config, so nothing you change in it reaches the host or other nests. `ensure`
+  refuses a slot that belongs to someone else (another owner, or the user's own unowned session).
 - Never capture the user's keyboard: `omadev focus`, the bar widget's capture click and
   Super+Shift+Alt+D are for the human at the machine. `focus` refuses without
   OMADEV_ALLOW_CAPTURE=1; do not set it. Drive a nest with `run`, `hyprctl N dispatch`,
@@ -54,7 +55,7 @@ omadev log 3 [-f] [--all]                       # shell + app output; --all keep
 omadev diff 3                                   # config/state the nest changed vs the host
 omadev stop 3                                   # blocks until the slot is free
 omadev clean 3                                  # remove the nest's private home
-omadev list --json                              # all slots, owners, pids, paths; state running|stopping|free|unreachable
+omadev list --json                              # all slots, owners, pids, paths; state free|starting|running|stopping|unreachable
 ```
 
 ## Facts that save time
@@ -64,7 +65,7 @@ omadev list --json                              # all slots, owners, pids, paths
 - A nest starts as a copy of the host's `~/.config/omarchy`, so every host
   plugin is already there; you only need `--plugin` to swap one for your own
   checkout. `--plugin <dir>` links the checkout into the nest under its
-  manifest id, at creation or later through `ensure` on a running nest; edit it in place and the nest hot-reloads. `list --json` shows the
+  manifest id, at creation or later through `ensure` on a running nest. `list --json` shows the
   links under `plugins`. Use a git worktree per teammate and merge branches.
 - A `--plugin` link is a symlink, and the shell's `inotifywait -r` watcher does not follow
   symlinked directories: edits to a linked plugin do NOT hot-reload. After editing, run
@@ -88,7 +89,8 @@ omadev list --json                              # all slots, owners, pids, paths
   Crash notifications in a nest are real crashes, from any process.
 - A new session's host window lands on the shared host workspace `omadev` without taking focus
   from the user, gridded evenly with the other sessions (floating, recomputed on start/stop).
-  The user switches there with the panel or `focus N` (user-only). `--place tile` keeps it tiled.
+  The user switches there with the panel or `focus N` (user-only). `--place tile` tiles it on the
+  workspace that was active at start instead.
 - Closing a session's window on the host ends the session (same as `stop N`).
 - The nested output always follows the host window's size (so screenshots are
   the size of the window on the host; there is no `--size`). Scale is 1 (`--scale`).
