@@ -29,7 +29,9 @@ import time
 from pathlib import Path
 
 SELF = Path(os.path.realpath(__file__))
-ROOT = SELF.parent.parent / "libexec"
+TREE = SELF.parent.parent          # the checkout, or /usr/lib/omadev when packaged
+ROOT = TREE / "libexec"
+CONFIG_DIR = Path(os.environ.get("XDG_CONFIG_HOME") or Path.home() / ".config")
 RUNTIME_DIR = Path(os.environ.get("XDG_RUNTIME_DIR") or f"/run/user/{os.getuid()}")
 RUN_DIR = RUNTIME_DIR / "omadev"
 # Nest homes live on the real filesystem (btrfs), not tmpfs: reflink copies
@@ -66,6 +68,8 @@ Usage:
   omadev diff N                    What nest N changed in its Omarchy config and state
   omadev stop [N|all] [--kill]     Ask the nest to exit and wait until it is gone (15 s; --kill then SIGTERM)
   omadev clean [N|all]             Remove a stopped nest's private home, launcher log and screenshots
+  omadev setup                     Install the user-level parts: the bar widget, the two host key bindings
+                                   and the agent skill links (idempotent; the installer and the package run it)
 
 N is a slot number 1-9. start picks the lowest free slot when N is omitted;
 other commands may omit N when one nest runs or when run from inside a nest.
@@ -983,6 +987,8 @@ def cmd_start(argv: list[str]) -> int:
         print(USAGE, end="")
         return 0
     path, plugins = validate_start(ns)
+    if not widget_dir().is_dir():
+        print("omadev: the bar widget and host keys are not set up yet; run once: omadev setup", file=sys.stderr)
     slot = choose_slot(ns.slot)
     (RUN_DIR / str(slot)).mkdir(parents=True, exist_ok=True)
     env_file(slot).unlink(missing_ok=True)
@@ -1042,6 +1048,80 @@ def cmd_publish(_args: list[str]) -> int:
     # The Wayland backend creates its output before the config's monitor rule
     # lands; a reload applies the WAYLAND-1 size.
     subprocess.run(["hyprctl", "reload"], capture_output=True)
+    return 0
+
+
+# ---------------------------------------------------------------- setup
+
+BINDINGS_BLOCK = """
+-- omadev: Super + Alt + D opens the sessions panel in the bar. With a session
+-- window focused, Super + Shift + Alt + D hands it every key until the same
+-- chord is pressed again.
+o.bind("SUPER + ALT + D", "Omadev sessions", "omarchy-shell dry.omadev toggle")
+o.bind("SUPER + SHIFT + ALT + D", "Capture keys for the focused omadev session", "env OMADEV_ALLOW_CAPTURE=1 omadev focus")
+hl.define_submap("nested", function()
+  hl.bind("SUPER + SHIFT + ALT + D", hl.dsp.submap("reset"), { description = "Release keys from the omadev session" })
+end)
+"""
+SKILL_DIRS = (".claude/skills", ".codex/skills", ".agents/skills")
+
+
+def widget_dir() -> Path:
+    return CONFIG_DIR / "omarchy/plugins/dry.omadev"
+
+
+def setup_widget() -> str:
+    """A copy, not a link: the shell only hot-reloads real directories under
+    ~/.config/omarchy/plugins. The running shell learns about a new plugin only
+    after a rescan, and the rescan is asynchronous."""
+    src = TREE / "plugin/dry.omadev"
+    dst = widget_dir()
+    dst.parent.mkdir(parents=True, exist_ok=True)
+    shutil.rmtree(dst, ignore_errors=True)
+    shutil.copytree(src, dst)
+    quiet = dict(capture_output=True, timeout=10)
+    with contextlib.suppress(OSError, subprocess.SubprocessError):
+        subprocess.run(["omarchy-shell", "shell", "rescanPlugins"], **quiet)
+    for _ in range(10):
+        with contextlib.suppress(OSError, subprocess.SubprocessError):
+            if subprocess.run(["omarchy", "plugin", "enable", "dry.omadev"], **quiet).returncode == 0:
+                return f"widget copied to {dst} and enabled; restart the bar once: omarchy restart shell"
+        time.sleep(0.5)
+    return f"widget copied to {dst}, but the bar could not enable it (shell not running?): " \
+           "omarchy restart shell && omarchy plugin enable dry.omadev"
+
+
+def setup_bindings() -> str:
+    path = CONFIG_DIR / "hypr/bindings.lua"
+    if path.is_file() and re.search(r"^-- omadev:", path.read_text(), re.M):
+        return f"bindings already in {path}"
+    path.parent.mkdir(parents=True, exist_ok=True)
+    with open(path, "a") as f:
+        f.write(BINDINGS_BLOCK)
+    with contextlib.suppress(OSError, subprocess.SubprocessError):
+        subprocess.run(["hyprctl", "reload"], capture_output=True, timeout=10)
+    return f"bindings appended to {path} (Super+Alt+D: panel, Super+Shift+Alt+D: capture/release)"
+
+
+def setup_skills() -> str:
+    linked = []
+    for rel in SKILL_DIRS:
+        d = Path.home() / rel
+        if d.is_dir():
+            link = d / "omadev"
+            if link.is_symlink() or link.exists():
+                link.unlink() if link.is_symlink() or link.is_file() else shutil.rmtree(link)
+            link.symlink_to(TREE / "skill")
+            linked.append(str(link))
+    return "skill linked into " + ", ".join(linked) if linked else "no agent skill directory found (~/.claude/skills, ~/.codex/skills, ~/.agents/skills); skipped"
+
+
+def cmd_setup(_args: list[str]) -> int:
+    if not (TREE / "plugin/dry.omadev/manifest.json").is_file():
+        die(f"{TREE} has no plugin/dry.omadev; run setup from the omadev checkout or package")
+    for step in (setup_widget, setup_bindings, setup_skills):
+        print(f"omadev: {step()}")
+    print("omadev: ready; start a session with: omadev start   (or Super+Alt+D, n)")
     return 0
 
 
@@ -1224,7 +1304,7 @@ COMMANDS = {
     "start": cmd_start, "ensure": cmd_ensure, "list": cmd_list, "focus": cmd_focus,
     "run": cmd_exec([]), "hyprctl": cmd_exec(["hyprctl"]), "shell": cmd_exec(["omarchy-shell"]),
     "screenshot": cmd_screenshot, "log": cmd_log, "diff": cmd_diff, "stop": cmd_stop, "clean": cmd_clean,
-    "_publish": cmd_publish,
+    "setup": cmd_setup, "_publish": cmd_publish,
 }
 
 

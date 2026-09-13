@@ -20,12 +20,18 @@ curl -fsSL https://raw.githubusercontent.com/llstrk/omadev/main/install.sh | bas
 omarchy restart shell
 ```
 
-Or clone and run `./install.sh`. It links `omadev` into `~/.local/bin`, copies
-the bar widget into `~/.config/omarchy/plugins` and enables it, appends the two
-host bindings below to `~/.config/hypr/bindings.lua`, and links the agent
-skill into `~/.claude/skills`, `~/.codex/skills` and `~/.agents/skills` where
-those exist. Nothing needs root. Running it again updates a curl-installed
-copy in `~/.local/share/omadev`.
+Or clone and run `./install.sh`. Either way the script links `omadev` into
+`~/.local/bin` and runs `omadev setup`, which does the three things that live
+in your home: it copies the bar widget into `~/.config/omarchy/plugins` and
+enables it, appends the two host bindings below to `~/.config/hypr/bindings.lua`,
+and links the agent skill into `~/.claude/skills`, `~/.codex/skills` and
+`~/.agents/skills` where those exist. Nothing needs root, and `omadev setup`
+is idempotent: run it again after an update to refresh the widget copy.
+Running the script again updates a curl-installed copy in `~/.local/share/omadev`.
+
+As a package (`pkg/PKGBUILD`, built for the Omarchy package repository), the
+code lands in `/usr/lib/omadev` with `/usr/bin/omadev` linked to it, and the
+post-install message asks you to run `omadev setup` once as your user.
 
 The bindings the installer appends to `~/.config/hypr/bindings.lua`:
 
@@ -276,7 +282,9 @@ omadev hyprctl 3 dispatch 'hl.dsp.exec_cmd("ghostty")'        # compositor-level
 
 ```
 bin/omadev                 launcher and every control command (Python 3, standard library only);
-                                   its hidden `_publish` runs inside the nest on start to record the environment
+                                   its hidden `_publish` runs inside the nest on start to record the environment;
+                                   `setup` installs the user-level parts (widget copy, bindings, skill links)
+pkg/                               PKGBUILD and install script for the Omarchy package repository
 libexec/hyprland.lua               nested Hyprland config (wraps your real hyprland.lua)
 libexec/overlay/                   PATH shims (bash, tiny exec wrappers): omarchy, omarchy-restart-shell, uwsm-app, systemd-run, systemd-cat
 libexec/keeper/shell.qml           per-nest helper: idle inhibitor + follow-the-window resize
