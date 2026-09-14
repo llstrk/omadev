@@ -1,0 +1,35 @@
+# Sourced by BASH_ENV, and before/after the nest's user shell startup files.
+# This is a session override, never a change to /etc/omarchy.conf. Bash's
+# source builtins are wrapped only for Omarchy's environment bootstrap: the
+# real user rc and the checkout's rc otherwise execute normally, in order.
+
+omadev_restore_env() {
+  [[ -n ${OMADEV_OMARCHY_PATH:-} && -n ${OMADEV_ROOT:-} ]] || return 0
+  export OMARCHY_PATH="$OMADEV_OMARCHY_PATH"
+  export BASH_ENV="$OMADEV_ROOT/bash-env"
+  local entry
+  local -a kept=()
+  local -a entries=()
+  IFS=: read -r -a entries <<<"${PATH:-/usr/local/bin:/usr/bin}"
+  for entry in "${entries[@]}"; do
+    [[ $entry == "$OMADEV_ROOT/overlay" || $entry == "$OMARCHY_PATH/bin" ]] && continue
+    kept+=("$entry")
+  done
+  local IFS=:
+  export PATH="$OMADEV_ROOT/overlay:$OMARCHY_PATH/bin${kept[*]:+:${kept[*]}}"
+}
+
+source() {
+  local omadev_source_file=${1:-}
+  [[ $omadev_source_file == -- ]] && omadev_source_file=${2:-}
+  case $omadev_source_file in
+    /usr/share/omarchy/default/bash/env-bootstrap|"${OMADEV_OMARCHY_PATH:-}/default/bash/env-bootstrap")
+      omadev_restore_env
+      ;;
+    *) builtin source "$@" ;;
+  esac
+}
+
+.() { source "$@"; }
+
+omadev_restore_env

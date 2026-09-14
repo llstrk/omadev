@@ -1,0 +1,23 @@
+#!/usr/bin/env python3
+"""Refresh only files in the nest's private Omarchy/Hyprland config trees."""
+import os
+from pathlib import Path
+import sys
+
+args = sys.argv[1:]
+if args in (['-h'], ['--help']):
+    print('Usage: omarchy-refresh-config <omarchy/...|hypr/...> (private nest config only)')
+    sys.exit(0)
+if len(args) != 1:
+    sys.exit('Usage: omarchy-refresh-config <omarchy/...|hypr/...>')
+rel = Path(args[0])
+home = Path(os.environ.get('OMADEV_HOME', '/nonexistent'))
+config = home.resolve() / '.config'
+if (os.environ.get('OMADEV_SLOT') not in tuple('123456789')
+        or os.environ.get('HOME') != str(home) or not config.is_dir()
+        or rel.is_absolute() or '..' in rel.parts
+        or len(rel.parts) < 2 or rel.parts[0] not in ('omarchy', 'hypr')
+        or not (config / rel).resolve().is_relative_to(config / rel.parts[0])):
+    sys.exit('omarchy-refresh-config (omadev): refusing a path outside private nest config')
+command = str(Path(os.environ['OMARCHY_PATH']) / 'bin/omarchy-refresh-config')
+os.execv(command, [command, *args])

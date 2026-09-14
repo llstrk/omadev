@@ -1,0 +1,10 @@
+#!/bin/bash
+# Build this nest's theme only. Stock post-theme hooks write shared app config,
+# signal host terminals and control hardware. Reload just this nest afterwards.
+[[ ${OMADEV_SLOT:-} =~ ^[1-9]$ && -n ${HYPRLAND_INSTANCE_SIGNATURE:-}
+   && $HOME == "${OMADEV_HOME:-}" && ! -L $HOME/.local/state/omarchy ]] || {
+  echo "omarchy-theme-set (omadev): not inside a nest" >&2; exit 1;
+}
+OMARCHY_THEME_HEADLESS=1 "$OMARCHY_PATH/bin/omarchy-theme-set" "$@" || exit $?
+hyprctl reload >/dev/null || exit $?
+exec "$OMADEV_ROOT/overlay/omarchy-restart-shell"

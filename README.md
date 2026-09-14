@@ -37,9 +37,8 @@ The bindings the installer appends to `~/.config/hypr/bindings.lua`:
 
 ```lua
 o.bind("SUPER + ALT + D", "Omadev sessions", "omarchy-shell dry.omadev toggle")
-o.bind("SUPER + SHIFT + ALT + D", "Capture keys for the focused omadev session", "env OMADEV_ALLOW_CAPTURE=1 omadev focus")
 hl.define_submap("nested", function()
-  hl.bind("SUPER + SHIFT + ALT + D", hl.dsp.submap("reset"), { description = "Release keys from the omadev session" })
+  hl.bind("SUPER + ALT + D", hl.dsp.submap("reset"), { description = "Release keys from the omadev session" })
 end)
 ```
 
@@ -50,17 +49,37 @@ symlinked plugin never hot-reloads, which is why the installer copies it. On the
 lit while sessions run, that opens a panel of the open sessions: a row per
 session with focus-and-capture and stop actions, and a + button that
 starts a new session in the first free slot. The panel takes the keyboard:
-j/k move, Enter focuses and captures, n starts a session, d (or x) stops the
-selected one, w goes to the omadev workspace, Esc closes. It also closes
+j/k move, Enter focuses and captures, and 1–9 focus and capture the corresponding
+session. While the panel is open, each visible session window has its number in
+the center. Opening the panel places the outline without flashing. Selecting a row
+moves the outline to its visible host window, then flashes that window without
+changing focus. The outline, flash and numbers use the theme's magenta palette color. Number shortcuts wait for the outline to arrive before focusing and closing the
+panel, then play only the session's red capture pulse (no extra selection flash).
+n starts a session, d (or x) marks the selected session red, and a second press
+confirms stopping it. The row immediately shows “Stopping…” and selection advances
+to the next running session (or the previous one at the end). Navigation skips
+unavailable rows and keeps the same session selected as stopped rows disappear.
+Moving selection or closing cancels confirmation.
+w goes to the omadev workspace, Esc closes. It also closes
 when it loses keyboard focus, for instance on a workspace switch, except
 right after n: a session's window mapping makes the compositor take focus
 away for a moment, and the panel takes it back, whoever started the session. Inside a session it shows
-whether the host is passing keys there and releases them on click; while
+whether the host is passing keys there and releases them on click. A full-window
+pulse uses theme red when capture starts and theme magenta when keys are released; while
 keys are captured a small box under the widget says how to release them. That label
 shrinks with the session's width so the bar's centre block does not run into
 it when the window is tiled narrow: full text, then a single word, then only
-the icon and slot number (the red highlight still shows capture). The two
-thresholds are widget settings, `compactBelow` (1300) and `iconOnlyBelow` (900). A new
+the icon and slot number (the red highlight still shows capture). A read-only
+modifier readout remains visible at every size: `mods: none`, `mods: Super+Ctrl`,
+or `mods: ?` when unavailable. A larger box below the release hint shows individual
+modifier labels, with held keys highlighted in the theme color. The box remains
+visible after release if any modifiers still appear held. It reports the nested compositor's key-down state
+for Super, Ctrl, Alt, Shift and AltGr, not the host's physical keyboard or an
+app's internal modifier state. When capture starts, the widget takes a fresh
+snapshot and sends key-up events for reported held modifier keys to that nest,
+after verifying it still has host focus and capture. It sends no key-downs and
+does not keep clearing modifiers during normal typing. Capture/release timing
+is unchanged; the displayed labels themselves remain read-only. The two thresholds are widget settings, `compactBelow` (1300) and `iconOnlyBelow` (900). A new
 plugin id needs one `omarchy restart shell` before the bar picks it up.
 
 A new session's window opens on the host workspace named `omadev`, shared by
@@ -93,17 +112,20 @@ omadev log 2 -f                         # follow nest 2's shell and app output (
 ```
 
 `start` without `--detach` stays in the foreground for the life of the nest,
-like running Hyprland by hand; Ctrl-C ends it, compositor and all. Use `--detach` from scripts and
-agents. `omarchy nested ...` is not routed by the Omarchy CLI, which only
+like running Hyprland by hand; Ctrl-C ends it, compositor and all. Scripts and
+agents can use `ensure` or `--detach` to launch the nest without blocking. That
+only detaches the session launcher: substantial tasks inside the nest should
+still run in visible foreground apps or terminals. `omarchy nested ...` is not routed by the Omarchy CLI, which only
 discovers commands in its own bin directory; call `omadev` directly.
 
 Super+Alt+D opens the sessions panel; each row focuses its nest and captures
-keys for it. Super+Shift+Alt+D toggles capture
-for whatever nest is focused; the keyboard icon on a panel row does the same.
+keys for it. Super+Alt+D releases captured keys. The keyboard icon on a panel
+row focuses and captures that session; the icon inside a session toggles capture.
+Capture focuses the window and verifies focus in a separate compositor round trip
+before entering passthrough. Release resets the host submap immediately.
 Capture is for the person at the keyboard: `omadev focus` refuses unless
-`OMADEV_ALLOW_CAPTURE=1` is set, which only the binding and the widget do, and
-the widget offers no capture over IPC, so a script or agent cannot take your
-keyboard. Ctrl-C in the launching terminal or `omadev stop N` ends a
+`OMADEV_ALLOW_CAPTURE=1` is explicitly set. The widget sets it for user actions
+and offers no capture method over its IPC interface. Ctrl-C in the launching terminal or `omadev stop N` ends a
 nest; `omadev stop all` ends every nest. `stop` waits until the slot
 is free (up to 15 s; `--kill` then sends SIGTERM to a compositor that ignores
 the exit request) and returns once the slot can be started again. Stopping
@@ -145,8 +167,7 @@ omadev list --json                      # every nest's environment, owner, pid; 
 OMADEV_ALLOW_CAPTURE=1 omadev focus 2   # focus nest 2 and capture keys (user-only guard); no number: the focused nest
 ```
 
-Nested-only Hyprland config goes in `~/.config/hypr/omadev.lua`; it is loaded
-after your normal config, only in the nest.
+Nested-only Hyprland config goes in `~/.config/hypr/omadev.lua`; it is copied into each new nest and loaded after the normal config. Edit the nest's private copy for live changes, or start a fresh nest to pick up host edits.
 
 ## Every nest has its own home and runtime dir
 
@@ -154,7 +175,7 @@ A nest never shares Omarchy config with the host or with other nests. Its
 home under `~/.local/state/omadev/N/home` is a directory of symlinks to the
 real home, except:
 
-- `~/.config/omarchy` and `~/.local/state/omarchy`, which are reflink clones
+- `~/.config/omarchy`, `~/.config/hypr` and `~/.local/state/omarchy`, which are reflink clones
   (btrfs copy-on-write: instant, and no blocks of their own until a file is
   written). shell.json, plugins, themes and toggles in the nest are the nest's.
   A config directory that is itself a symlink (a dotfiles checkout) is copied
@@ -165,11 +186,10 @@ real home, except:
   the one already running on the host.
 
 Everything else, projects, keys, app configs, is the real file. Symlinks
-inside the two cloned trees are kept private too: one pointing elsewhere in
+inside the cloned trees are kept private too: one pointing elsewhere in
 the same tree is re-pointed into the clone, one pointing outside it (a
 `shell.json` from a dotfiles checkout) becomes a copy. The nest also gets its
-own `.bashrc`, which runs yours and then restores the nest's `OMARCHY_PATH`
-and PATH overlay, since Omarchy's shell bootstrap resets them.
+own `.bashrc` and login profile, which select the checkout before running yours and restore checkout/PATH ordering afterwards. A Bash-only source wrapper redirects Omarchy's environment bootstrap to the nest's selection, so aliases and functions load from the checkout rather than the host. `BASH_ENV` applies the same selection to non-interactive Bash scripts. No global bootstrap or `/etc/omarchy.conf` is modified.
 
 The nest's `XDG_RUNTIME_DIR` is private in the same way: `$XDG_RUNTIME_DIR/omadev-N`
 (short on purpose: Unix socket paths are capped at 107 bytes and the host
@@ -191,13 +211,58 @@ omadev stop 3 && omadev clean 3                        # the home is kept until 
 plugins directory under its manifest id, so each teammate works on its own
 branch and the orchestrator merges branches instead of copying files. It also
 works through `ensure` on a running nest. `--reuse` keeps the previous home of
-a slot instead of cloning a fresh one. `diff` excludes linked checkouts (use
-git there) and churny state such as clipboard history.
+a slot instead of cloning a fresh one. Reusing a home from an older release privatizes its previously shared Hyprland directory first. `diff` includes Hyprland config but excludes linked checkouts (use git there) and churny state such as clipboard history.
+
+## Checkout sessions and safety boundaries
+
+`--path` selects checkout code and defaults, not a fresh install: existing user config and generated theme state are copied. A valid user `shell.json` replaces the checkout's default shell config entirely. The installed Hyprland and Quickshell binaries are still used.
+
+At startup, omadev sources the checkout's `default/uwsm/default`, followed by the private-home view of `~/.config/uwsm/default`. It preserves added, changed, empty and unset exported variables for commands run through `omadev run`. It does not run UWSM itself or its full `env.d` startup chain. Bash startup is checkout-aware; other interactive shells' own startup files are not rewritten.
+
+The shell and checkout commands inherit `PATH` in this order: omadev safety overlays, the selected checkout's `bin`, then the remaining inherited paths. Changes to shell code need `omadev run N omarchy restart shell`; use `omadev hyprctl N reload` for Hyprland config changes.
+
+Known host-affecting commands are guarded:
+
+- `sudo`, `pkexec`, `systemctl`, broad app/service restart helpers and app/hardware theme helpers are refused inside a nest. Run intentional host operations from a host terminal.
+- `omarchy refresh config` only accepts paths inside private `hypr/` or `omarchy/` config, rejecting traversal and symlinks leading outside those trees. `omarchy refresh hyprland` now changes only the nest.
+- `omarchy theme set` builds the private theme using the stock headless mode, then reloads only the nest's compositor and shell. It skips post-theme hooks, app config writes, terminal signals and keyboard lighting. The nested desktop updates, but there is no animated theme transition or host-app retinting.
+
+These are guardrails, **not a security sandbox**. Projects, keys, most app config, cache and data directories, host sockets, processes and hardware remain shared. Absolute executable paths, direct file writes, custom scripts and direct D-Bus/hardware access can bypass the guards. Only run trusted checkouts and plugins.
+
+## Tests
+
+```bash
+python3 -m unittest discover -s tests -p 'test_*.py' -v
+node tests/panel.cjs
+```
+
+The checkout tests use disposable homes and harmless command stubs. The router integration test also exercises the installed Omarchy router if available. They require neither a compositor nor root privileges.
 
 ## For agents and orchestrators
 
 `skill/SKILL.md` (linked into the agent skill directories by the installer) is
-the agent-facing guide. The commands built for it:
+the agent-facing guide.
+
+**Prefer work the user can see.** Use the actual app for UI work, and run builds,
+tests, servers and other substantial tasks in a visible terminal inside the
+session. Keep progress and results visible instead of hiding the main work in
+headless commands, detached tmux sessions, background jobs or logs alone. Quick
+probes, IPC, readiness checks and genuinely background services can stay headless;
+explicit user requests and technical requirements can override the preference.
+Do not take host focus, capture the user's keyboard or switch their workspace
+just to make the work visible.
+
+For example (replace the project path):
+
+```bash
+omadev hyprctl 3 dispatch \
+  'hl.dsp.exec_cmd("ghostty --title=omadev-3-build-tests --wait-after-command=true -e bash -lc \"cd ~/Work/my-project && ./bin/build && ./bin/test\"")'
+```
+
+The terminal is launched asynchronously, but the task runs in its foreground.
+`--wait-after-command` leaves the output visible when it finishes.
+
+Other commands for driving the nest:
 
 ```bash
 omadev ensure 3 --owner teammate-1 --plugin ~/wt/fix   # idempotent claim, waits for the shell, JSON out
@@ -212,7 +277,7 @@ omadev hyprctl 3 dispatch 'hl.dsp.exec_cmd("ghostty")'        # compositor-level
 | | Nest |
 |---|---|
 | `~/.config/omarchy` (shell.json, plugins, themes, current theme) | private reflink clone per nest |
-| `~/.config/hypr/*.lua` | shared; `monitors.lua` rules do not match the nested output |
+| `~/.config/hypr/*.lua` | private reflink clone per nest |
 | Hardware via sysfs, hwmon, i2c, system bus | shared, real values |
 | `OMARCHY_PATH` | the nest's own (`--path`) |
 | Compositor, Wayland socket, Hyprland instance | separate |
@@ -229,16 +294,20 @@ omadev hyprctl 3 dispatch 'hl.dsp.exec_cmd("ghostty")'        # compositor-level
 - **`omarchy restart shell`.** The stock command takes the host's `OMARCHY_PATH`
   from the systemd environment and kills every quickshell running that config
   on any display, which is the host bar. `libexec/overlay/` shadows it with a
-  version that only touches the nest's display.
+  version that only touches the nest's display. The checkout's own router still handles argument parsing, aliases and help, but its final dispatch honors overlays, including for `omarchy restart-shell`.
 - **`uwsm-app` and `systemd-run`.** The real ones hand commands to
   `wayland-wm-app-daemon` or the user's systemd manager, which spawn them with
   the host's environment, so SUPER+Return would open a terminal on the host and
   SUPER+B a browser. The overlays run the command directly in the nest instead.
-- **Idle and lock.** A small Quickshell "keeper" in each nest holds a Wayland
-  idle inhibitor, so the nested shell never starts its screensaver or lock
-  and never competes with the host lock for the fingerprint reader.
-  Disabling idle through the shell would write the shared stay-awake file
-  and switch the host's idle off too. `--idle` turns the inhibitor off.
+- **Idle and lock.** The launcher disables the shell's automatic screensaver
+  and lock cycle using a stay-awake marker in the nest's private state, including
+  reused homes. The host's idle settings are untouched. A small Quickshell
+  "keeper" also holds a Wayland idle inhibitor as an extra safeguard, but idle
+  prevention does not depend on that surface remaining visible. The session
+  widget also disables idle at startup (retrying until the idle service is ready),
+  so sessions created by an older installed launcher are protected too. `--idle`
+  skips this enforcement, clears the private marker in the current launcher, and
+  turns the inhibitor off for testing idle behavior.
 - **Window size.** The nested output follows the host window. Hyprland's
   Wayland backend resizes the output, but the compositor neither re-arranges
   its layers and windows nor tells clients about the new mode until the
@@ -289,7 +358,10 @@ bin/omadev                 launcher and every control command (Python 3, standar
                                    its hidden `_publish` runs inside the nest on start to record the environment;
                                    `setup` installs the user-level parts (widget copy, bindings, skill links)
 pkg/                               PKGBUILD and install script for the Omarchy package repository
-libexec/hyprland.lua               nested Hyprland config (wraps your real hyprland.lua)
-libexec/overlay/                   PATH shims (bash, tiny exec wrappers): omarchy, omarchy-restart-shell, uwsm-app, systemd-run, systemd-cat
+libexec/hyprland.lua               nested Hyprland config (wraps the private copy of your hyprland.lua)
+libexec/bash-env                   checkout-aware Bash bootstrap, used by BASH_ENV and private startup files
+libexec/overlay/                   CLI dispatch, safe refresh/theme/restart, launcher shims and host-command guards
+libexec/refuse-host-command        shared refusal implementation for guard symlinks
 libexec/keeper/shell.qml           per-nest helper: idle inhibitor + follow-the-window resize
+tests/                            disposable checkout/environment tests and panel behavior tests
 ```

@@ -1,0 +1,4 @@
+#!/bin/bash
+# These services and broad process signals belong to the host, not a nest.
+echo "${0##*/} (omadev): refused, this affects the host. Run it explicitly from the host session if intended." >&2
+exit 1

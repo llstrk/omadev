@@ -1,6 +1,6 @@
 -- omadev: Hyprland config for a nested Omarchy session.
 --
--- Runs the user's real ~/.config/hypr/hyprland.lua so bindings, look and feel,
+-- Runs a private copy of the user's ~/.config/hypr/hyprland.lua so bindings, look and feel,
 -- window rules and theme all match the host, but swaps out the two modules
 -- that must not run twice on one machine: Omarchy's session autostart (systemd
 -- environment import, power profiles, udiskie, first-run provisioning) and the
@@ -49,11 +49,18 @@ require_optional.module("hypr.omadev")
 local scale = tonumber(os.getenv("OMADEV_SCALE") or "1") or 1
 hl.monitor({ output = "WAYLAND-1", mode = "preferred", position = "0x0", scale = scale })
 
--- The overlay must beat $OMARCHY_PATH/bin, which envs.lua moves to the front.
-hl.env("PATH", root .. "/overlay:" .. (os.getenv("PATH") or "/usr/local/bin:/usr/bin"))
+-- Keep the checkout and safety overrides first, even if the user's Lua
+-- config or the checkout's envs.lua reordered PATH. Avoid duplicate entries.
+local first = { root .. "/overlay", omarchy_path .. "/bin" }
+for entry in (os.getenv("PATH") or "/usr/local/bin:/usr/bin"):gmatch("[^:]+") do
+  if entry ~= first[1] and entry ~= first[2] then table.insert(first, entry) end
+end
+hl.env("OMARCHY_PATH", omarchy_path)
+hl.env("PATH", table.concat(first, ":"))
 
 hl.on("hyprland.start", function()
-  hl.exec_cmd("omadev _publish")
+  -- Use this launcher, not an older installed omadev found on PATH.
+  hl.exec_cmd("'" .. (root .. "/../bin/omadev"):gsub("'", "'\\''") .. "' _publish")
   hl.exec_cmd("quickshell -p '" .. (root .. "/keeper"):gsub("'", "'\\''") .. "'")
   if os.getenv("OMADEV_NO_SHELL") ~= "1" then
     hl.exec_cmd("omarchy-launch-shell")

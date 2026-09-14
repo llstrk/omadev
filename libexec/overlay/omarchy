@@ -1,10 +1,16 @@
 #!/bin/bash
-# Nested router shim: `omarchy restart shell` must only restart the shell on
-# this display. Everything else goes to the real router.
-overlay=$(cd "$(dirname "$(readlink -f "${BASH_SOURCE[0]}")")" && pwd)
-if [[ ${1:-} == restart && ${2:-} == shell ]]; then
-  exec "$overlay/omarchy-restart-shell" "${@:3}"
-fi
-clean_path=$(tr ':' '\n' <<<"$PATH" | grep -vxF "$overlay" | paste -sd:)
-real=$(PATH=$clean_path command -v omarchy) || { echo "omarchy: real router not found" >&2; exit 1; }
-exec "$real" "$@"
+# Let the checkout router resolve ALL spellings, aliases, metadata and help.
+# Only intercept its final exec, so an absolute bin path cannot bypass a nest
+# override. Do not reimplement the router's argument parsing here.
+[[ -n ${OMARCHY_PATH:-} && -f $OMARCHY_PATH/bin/omarchy ]] || {
+  echo "omarchy (omadev): checkout router not found" >&2; exit 1;
+}
+omadev_overlay=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)
+exec() {
+  if [[ ${1:-} == "$OMARCHY_PATH/bin/"* && -x $omadev_overlay/${1##*/} ]]; then
+    builtin exec "$omadev_overlay/${1##*/}" "${@:2}"
+  else
+    builtin exec "$@"
+  fi
+}
+builtin source "$OMARCHY_PATH/bin/omarchy" "$@"

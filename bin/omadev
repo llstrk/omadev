@@ -6,8 +6,8 @@
 Up to nine nests run side by side, each with its own compositor, session bus,
 omarchy-shell and Omarchy source tree. They share the kernel, the user,
 sysfs, the system bus and the real home, so plugins that read battery, power
-limits or DDC see the real hardware. Only ~/.config/omarchy, ~/.local/state/omarchy
-and browser profiles are private copies, so a nest never changes the host's setup.
+limits or DDC see the real hardware. Omarchy and Hyprland config, Omarchy state and browser profiles are private.
+Other files and hardware are shared; the overlays are guardrails, not a sandbox.
 """
 
 from __future__ import annotations
@@ -68,7 +68,7 @@ Usage:
   omadev diff N                    What nest N changed in its Omarchy config and state
   omadev stop [N|all] [--kill]     Ask the nest to exit and wait until it is gone (15 s; --kill then SIGTERM)
   omadev clean [N|all]             Remove a stopped nest's private home, launcher log and screenshots
-  omadev setup                     Install the user-level parts: the bar widget, the two host key bindings
+  omadev setup                     Install the user-level parts: the bar widget, the host key binding
                                    and the agent skill links (idempotent; the installer and the package run it)
 
 N is a slot number 1-9. start picks the lowest free slot when N is omitted;
@@ -83,12 +83,12 @@ Start options:
   --place <mode>   workspace: the nest joins the host workspace named omadev without stealing focus (default)
                    tile: leave the window where the host's layout puts it   (env: OMADEV_PLACE)
   --no-shell       Compositor only
-  --idle           Let the nested shell run its idle/screensaver/lock cycle (default: inhibited)
+  --idle           Let the nested shell run its idle/screensaver/lock cycle (default: disabled)
   --reuse          Keep this slot's previous private home instead of cloning a fresh one
   --plugin <dir>   Link a plugin checkout (e.g. a git worktree) into the nest's plugins under its
                    manifest id; repeatable
 
-Every nest gets a private home: reflink clones of ~/.config/omarchy and ~/.local/state/omarchy
+Every nest gets a private home: reflink clones of ~/.config/{omarchy,hypr} and ~/.local/state/omarchy
 plus empty browser profiles, and symlinks to everything else. shell.json, plugins, toggles and
 theme state of a nest never touch the host; `diff N` shows what it changed. It also gets a private
 XDG_RUNTIME_DIR that shares the host's sockets (Wayland, PipeWire, agents) but not its per-session
@@ -96,7 +96,7 @@ state, so a recorder or single-instance app inside the nest does not see the hos
 
 Inside a nest: `omarchy restart shell` restarts only that nest's shell, `wtype` types into it,
 `hyprctl dispatch '<lua>'` drives its compositor. Host keys: Super+Alt+D opens the sessions panel,
-Super+Shift+Alt+D toggles key passthrough for the focused nest. `omarchy nested ...` is not routed by the Omarchy CLI.
+Super+Alt+D also releases captured keys; select a session in the panel to capture. `omarchy nested ...` is not routed by the Omarchy CLI.
 """
 
 
@@ -123,13 +123,12 @@ def env_file(slot: int) -> Path:
 def read_env(slot: int) -> dict[str, str]:
     env: dict[str, str] = {}
     try:
-        lines = env_file(slot).read_text().splitlines()
+        assignments = shlex.split(env_file(slot).read_text())
     except FileNotFoundError:
         return env
-    for line in lines:
-        key, _, raw = line.partition("=")
-        parts = shlex.split(raw) if raw else [""]
-        env[key] = parts[0]
+    for assignment in assignments:
+        key, _, value = assignment.partition("=")
+        env[key] = value
     return env
 
 
@@ -222,7 +221,14 @@ def nest_env(slot: int) -> dict[str, str]:
             f"(its compositor socket under {RUNTIME_DIR}/hypr is not accessible; agent sandbox?)")
     if health != "alive" or "WAYLAND_DISPLAY" not in record:
         die(f"nest {slot} is not running")
+    return session_environment(record)
+
+
+def session_environment(record: dict[str, str]) -> dict[str, str]:
     env = {**os.environ, **record}
+    for key in record.get('OMADEV_SESSION_UNSET', '').split():
+        if key not in record:
+            env.pop(key, None)
     if "DISPLAY" not in record:
         env.pop("DISPLAY", None)  # no Xwayland in the nest: X11 apps must not land on the host
     return env
@@ -232,7 +238,7 @@ def shell_ping(slot: int) -> bool:
     record = read_env(slot)
     if slot_health(slot, record) != "alive" or "WAYLAND_DISPLAY" not in record:
         return False
-    env = {**os.environ, **record, "OMARCHY_SHELL_IPC_TIMEOUT": "1s"}
+    env = {**session_environment(record), "OMARCHY_SHELL_IPC_TIMEOUT": "1s"}
     try:
         return subprocess.run(["omarchy-shell", "shell", "ping"], env=env, capture_output=True, timeout=5).returncode == 0
     except (subprocess.TimeoutExpired, FileNotFoundError):
@@ -326,25 +332,32 @@ def privatize_links(clone: Path, origin: Path) -> None:
             return
 
 
+def clone_private(origin: Path, target: Path) -> None:
+    if origin.is_dir():
+        subprocess.run(["cp", "-a", "-H", "--reflink=auto", str(origin), str(target)], check=True)
+        privatize_links(target, origin.resolve())
+    else:
+        target.mkdir(parents=True, exist_ok=True)
+
+
 def write_bashrc(sb: Path, real: Path, path: Path) -> None:
     """Omarchy's env-bootstrap, sourced by every bash, resets OMARCHY_PATH to the
-    packaged tree when /etc/omarchy.conf is absent; a nest running a checkout
-    would lose it in any terminal or `bash -lc`. The nest's own .bashrc runs
-    the real one, then restores the nest's values."""
+    host tree. Install the session bootstrap before sourcing user files, so
+    aliases/functions come from the checkout, then repair any PATH edits."""
     q = shlex.quote
-    rc = ["# omadev: the real .bashrc, then this nest's Omarchy tree and PATH overlay.",
-          '[ -n "$OMADEV_BASHRC" ] && return; OMADEV_BASHRC=1',
+    setup = [f"export OMADEV_ROOT={q(str(ROOT))} OMADEV_OMARCHY_PATH={q(str(path))}",
+             f"builtin source {q(str(ROOT / 'bash-env'))}"]
+    rc = ["# omadev: select this checkout BEFORE the real rc loads defaults.", *setup,
+          '[ -n "${OMADEV_BASHRC:-}" ] && return; OMADEV_BASHRC=1',
           f"[ -r {q(str(real / '.bashrc'))} ] && . {q(str(real / '.bashrc'))}",
-          f"export OMARCHY_PATH={q(str(path))}",
-          f'case ":$PATH:" in *:{q(str(ROOT / "overlay"))}:*) ;; *) PATH={q(str(ROOT / "overlay"))}:$PATH ;; esac',
-          "export PATH", ""]
+          *setup, ""]
     # Login shells (terminals, `bash -lc`) read .bash_profile: the real one if
     # there is one (it normally sources ~/.bashrc, which is now ours), else .profile,
     # and then ours in any case; the guard above keeps it from running twice.
-    profile = ["# omadev: the real login profile, then this nest's .bashrc.",
+    profile = ["# omadev: pin the checkout before and after user login setup.", *setup,
                f"if [ -r {q(str(real / '.bash_profile'))} ]; then . {q(str(real / '.bash_profile'))}; "
                f"elif [ -r {q(str(real / '.profile'))} ]; then . {q(str(real / '.profile'))}; fi",
-               '[ -r "$HOME/.bashrc" ] && . "$HOME/.bashrc"', ""]
+               '[ -r "$HOME/.bashrc" ] && . "$HOME/.bashrc"', *setup, ""]
     for name, lines in ((".bashrc", rc), (".bash_profile", profile)):
         f = sb / name
         if f.is_symlink() or f.exists():
@@ -354,18 +367,25 @@ def write_bashrc(sb: Path, real: Path, path: Path) -> None:
 
 def make_home(slot: int, reuse: bool, path: Path) -> Path:
     """The nest's private home: symlinks to the real one, except
-    ~/.config/omarchy and ~/.local/state/omarchy, which are reflink clones the
+    Omarchy/Hyprland config and Omarchy state, which are reflink clones the
     nest owns, and browser profiles, which start empty."""
     real = Path.home()
     sb = HOME_BASE / str(slot) / "home"
     if sb.is_dir() and reuse:
+        # Homes from older releases linked Hyprland config to the host.
+        # Privatize that link before allowing refresh/edit commands in a reused nest.
+        hypr = sb / '.config/hypr'
+        if hypr.is_symlink():
+            origin = hypr.resolve()
+            hypr.unlink()
+            clone_private(origin, hypr)
         write_bashrc(sb, real, path)
         return sb
     shutil.rmtree(sb, ignore_errors=True)
     (sb / ".config").mkdir(parents=True)
     (sb / ".local/state").mkdir(parents=True)
     link_entries(real, sb, {".config", ".local"})
-    link_entries(real / ".config", sb / ".config", {"omarchy", *BROWSER_PROFILES})
+    link_entries(real / ".config", sb / ".config", {"omarchy", "hypr", *BROWSER_PROFILES})
     # Chromium-family browsers are single-instance per profile: through a
     # linked profile, a browser started in the nest would just open a window
     # in the browser already running on the host. Fresh, empty profiles here.
@@ -374,19 +394,29 @@ def make_home(slot: int, reuse: bool, path: Path) -> Path:
             (sb / ".config" / name).mkdir()
     link_entries(real / ".local", sb / ".local", {"state"})
     link_entries(real / ".local/state", sb / ".local/state", {"omarchy"})
-    for rel in (".config/omarchy", ".local/state/omarchy"):
-        if (real / rel).is_dir():
-            # -H: a ~/.config/omarchy that is itself a symlink (dotfiles checkout) is
-            # copied as a directory, never shared with the host through the link.
-            subprocess.run(["cp", "-a", "-H", "--reflink=auto", str(real / rel), str(sb / rel)], check=True)
-        else:
-            (sb / rel).mkdir()
-        privatize_links(sb / rel, Path(os.path.realpath(real / rel)))
+    for rel in (".config/omarchy", ".config/hypr", ".local/state/omarchy"):
+        clone_private(real / rel, sb / rel)
     write_bashrc(sb, real, path)
     # The shell replays persisted popups at start; the nest begins with none.
     shutil.rmtree(sb / ".local/state/omarchy/notifications", ignore_errors=True)
     (sb / ".local/state/omarchy/notifications").mkdir()
     return sb
+
+
+def configure_idle(home: Path, allow_idle: bool) -> None:
+    """Disable the shell's idle cycle in private state, including reused homes.
+
+    A Wayland inhibitor alone may stop working when its surface isn't visible.
+    Never use the host's stay-awake marker for this.
+    """
+    marker = home / ".local/state/omarchy/indicators/stay-awake"
+    if not marker.resolve().is_relative_to(home.resolve()):
+        die(f"refusing to change idle state outside the nest home: {marker}")
+    if allow_idle:
+        marker.unlink(missing_ok=True)
+    else:
+        marker.parent.mkdir(parents=True, exist_ok=True)
+        marker.touch()
 
 
 # ---------------------------------------------------------------- private runtime dir
@@ -401,6 +431,37 @@ def nest_runtime(slot: int) -> Path:
     return RUNTIME_DIR / f"omadev-{slot}"
 
 
+def remove_runtime(slot: int) -> None:
+    """Remove a stopped nest's runtime, including an orphaned GVFS FUSE mount.
+
+    Never traverse a mounted filesystem or unmount anything outside this nest.
+    A disconnected FUSE mount cannot be detected reliably with stat/ismount.
+    """
+    run = nest_runtime(slot)
+    if run.is_symlink():
+        run.unlink()
+        return
+    mounts = []
+    for line in Path('/proc/self/mountinfo').read_text().splitlines():
+        fields = line.split()
+        target = Path(re.sub(r'\\([0-7]{3})', lambda m: chr(int(m[1], 8)), fields[4]))
+        if target != run and run not in target.parents:
+            continue
+        kind = fields[fields.index('-') + 1]
+        if target != run / 'gvfs' or kind != 'fuse.gvfsd-fuse':
+            die(f'refusing to remove runtime with unexpected mount: {target} ({kind})')
+        mounts.append(target)
+    for target in mounts:
+        result = subprocess.run(['fusermount3', '-u', '-z', str(target)],
+                                capture_output=True, text=True, timeout=10)
+        if result.returncode:
+            die(f'could not detach stale nest mount {target}: {result.stderr.strip()}')
+    try:
+        shutil.rmtree(run)
+    except FileNotFoundError:
+        pass
+
+
 def make_runtime(slot: int) -> Path:
     """The nest's XDG_RUNTIME_DIR: a 0700 directory of its own beside the real
     one's contents. Sockets, and directories that hold sockets, are the host's
@@ -410,7 +471,7 @@ def make_runtime(slot: int) -> Path:
     sees the host's copy. Lock and other plain files are linked: they belong
     to the sockets next to them."""
     run = nest_runtime(slot)
-    shutil.rmtree(run, ignore_errors=True)
+    remove_runtime(slot)
     run.mkdir(parents=True, mode=0o700)
     os.chmod(run, 0o700)
     for entry in RUNTIME_DIR.iterdir():
@@ -463,7 +524,7 @@ def cmd_diff(args: list[str]) -> int:
     print(f"# nest home {sb} vs real home; linked plugin checkouts are excluded (diff those with git)", flush=True)
     linked = [f"--exclude={p.name}" for p in (sb / ".config/omarchy/plugins").glob("*") if p.is_symlink()]
     churn = ["--exclude=clipboard-images", "--exclude=clipboard-history.json", "--exclude=notifications", "--exclude=agents"]
-    for rel, extra in ((".config/omarchy", linked), (".local/state/omarchy", churn)):
+    for rel, extra in ((".config/omarchy", linked), (".config/hypr", []), (".local/state/omarchy", churn)):
         subprocess.run(["diff", "-ruN", "--exclude=.git", *extra, str(real / rel), str(sb / rel)])
     return 0
 
@@ -483,7 +544,7 @@ def cmd_clean(args: list[str]) -> int:
         os.ftruncate(fd, 0)  # no launcher PID while we hold it
         try:
             shutil.rmtree(home, ignore_errors=True)
-            shutil.rmtree(nest_runtime(slot), ignore_errors=True)
+            remove_runtime(slot)
             for entry in runtime.iterdir() if runtime.is_dir() else []:
                 if entry.name != "lock":  # the lock inode stays: others may have it open
                     shutil.rmtree(entry, ignore_errors=True) if entry.is_dir() and not entry.is_symlink() else entry.unlink(missing_ok=True)
@@ -530,7 +591,7 @@ def validate_start(ns: argparse.Namespace) -> tuple[Path, list[Path]]:
     for tool in ("Hyprland", "quickshell", "dbus-run-session"):
         shutil.which(tool) or die(f"{tool} is not installed")
     path = Path(os.path.realpath(ns.path))
-    for rel in ("default/hypr/bootstrap.lua", "shell/shell.qml"):
+    for rel in ("bin/omarchy", "default/hypr/bootstrap.lua", "shell/shell.qml"):
         (path / rel).is_file() or die(f"{path} is not an Omarchy source tree (no {rel})")
     ns.size and die("--size is not supported: a nest always follows the size of its host window")
     plugins = [Path(os.path.realpath(p)) for p in ns.plugin]
@@ -628,6 +689,7 @@ def choose_slot(requested: str | None) -> int:
 def nest_environment(slot: int, ns: argparse.Namespace, path: Path, plugins: list[Path]) -> dict[str, str]:
     env = dict(os.environ)
     sb = make_home(slot, ns.reuse, path)
+    configure_idle(sb, ns.idle)
     for plugin in plugins:
         link_plugin(sb, plugin)
     env.update(OMADEV_HOME=str(sb), HOME=str(sb), XDG_CONFIG_HOME=str(sb / ".config"),
@@ -636,6 +698,8 @@ def nest_environment(slot: int, ns: argparse.Namespace, path: Path, plugins: lis
                OMADEV_HOST_RUNTIME=str(RUNTIME_DIR))
     env.update(
         OMARCHY_PATH=str(path),
+        OMADEV_OMARCHY_PATH=str(path),
+        BASH_ENV=str(ROOT / "bash-env"),
         OMADEV_OWNER=ns.owner,
         OMADEV_ROOT=str(ROOT),
         OMADEV_SLOT=str(slot),
@@ -646,7 +710,7 @@ def nest_environment(slot: int, ns: argparse.Namespace, path: Path, plugins: lis
         OMADEV_IDLE="1" if ns.idle else "0",
         OMADEV_HOST=os.environ["WAYLAND_DISPLAY"],
         OMADEV_HOST_SIG=os.environ.get("HYPRLAND_INSTANCE_SIGNATURE", ""),
-        PATH=f"{ROOT / 'overlay'}:{os.environ.get('PATH', '/usr/local/bin:/usr/bin')}",
+        PATH=checkout_path(path, os.environ.get('PATH', '/usr/local/bin:/usr/bin')),
         # No systemd on the private bus, so at-spi would loop trying to activate it.
         NO_AT_BRIDGE="1", GTK_A11Y="none",
     )
@@ -655,7 +719,53 @@ def nest_environment(slot: int, ns: argparse.Namespace, path: Path, plugins: lis
     env.pop("HYPRLAND_INSTANCE_SIGNATURE", None)
     env.pop("HYPRLAND_CMD", None)
     env.pop("DISPLAY", None)  # the nest's own Xwayland sets it, if any; never the host's
-    return env
+    return session_defaults(env)
+
+
+def checkout_path(path: Path, inherited: str) -> str:
+    first = [str(ROOT / 'overlay'), str(path / 'bin')]
+    return ':'.join(first + [p for p in inherited.split(':') if p not in first])
+
+
+def session_defaults(env: dict[str, str]) -> dict[str, str]:
+    """Load checkout session defaults, without starting UWSM or its services.
+    Preserve the nest's identity even if a user override changes HOME/PATH.
+    Record changed/unset variables so `run` and D-Bus see the same defaults.
+    """
+    script = '''
+for file in "$OMARCHY_PATH/default/uwsm/default" "$HOME/.config/uwsm/default"; do
+  if [[ -f $file ]]; then source "$file" >&2 || exit; fi
+done
+/usr/bin/env -0
+'''
+    process = subprocess.Popen(['/bin/bash', '--noprofile', '--norc', '-c', script],
+                               env=env, stdout=subprocess.PIPE, stderr=subprocess.PIPE, start_new_session=True)
+    try:
+        output, errors = process.communicate(timeout=15)
+    except subprocess.TimeoutExpired:
+        with contextlib.suppress(ProcessLookupError):
+            os.killpg(process.pid, signal.SIGKILL)
+        process.communicate()
+        die('session defaults did not finish within 15 seconds')
+    if process.returncode:
+        die('session defaults failed: ' + errors.decode(errors='replace').strip())
+    loaded = dict(os.fsdecode(item).split('=', 1) for item in output.split(b'\0') if b'=' in item)
+    # Bash implementation details must not become session defaults.
+    for key in ('_', 'SHLVL', 'PWD', 'OLDPWD', 'LINENO'):
+        if key in env:
+            loaded[key] = env[key]
+        else:
+            loaded.pop(key, None)
+    for key, value in env.items():
+        if key.startswith('OMADEV_') or key in ('HOME', 'BASH_ENV', 'OMARCHY_PATH', 'WAYLAND_DISPLAY',
+                'XDG_CONFIG_HOME', 'XDG_STATE_HOME', 'XDG_DATA_HOME', 'XDG_CACHE_HOME', 'XDG_RUNTIME_DIR'):
+            loaded[key] = value
+    for key in ('DISPLAY', 'HYPRLAND_INSTANCE_SIGNATURE', 'HYPRLAND_CMD'):
+        loaded.pop(key, None)
+    loaded['PATH'] = checkout_path(Path(env['OMARCHY_PATH']), loaded.get('PATH', env['PATH']))
+    loaded['OMADEV_SESSION_KEYS'] = ' '.join(sorted(k for k, v in loaded.items() if env.get(k) != v))
+    loaded['OMADEV_SESSION_UNSET'] = ' '.join(sorted(set(env) - set(loaded)))
+    return loaded
 
 
 def private_bus_config(slot: int) -> Path:
@@ -1004,7 +1114,7 @@ def cmd_start(argv: list[str]) -> int:
         env["OMADEV_START_WS"] = str((hostctl_json("activeworkspace") or {}).get("id", ""))
     print(f"omadev: slot {slot}  OMARCHY_PATH={path}  scale={ns.scale} "
           f"shell={0 if ns.no_shell else 1} idle={1 if ns.idle else 0} home={env['OMADEV_HOME']}")
-    print(f"omadev: Super+Shift+Alt+D captures keys for this nest when its window is focused, and releases them; "
+    print(f"omadev: select this session in the panel to capture keys; Super+Alt+D releases them; "
           f"Ctrl-C here or 'omadev stop {slot}' ends it", flush=True)
     return run_foreground(slot, env, ns.extra)
 
@@ -1036,17 +1146,20 @@ def cmd_publish(_args: list[str]) -> int:
     # The private bus was started with the host's display in its activation
     # environment; point bus-activated services (portals, keyring) at the nest.
     subprocess.run(["dbus-update-activation-environment", "WAYLAND_DISPLAY", "HYPRLAND_INSTANCE_SIGNATURE", "DISPLAY",
-                    "XDG_CURRENT_DESKTOP", "XDG_SESSION_DESKTOP", "OMARCHY_PATH", "PATH"], capture_output=True)
+                    "XDG_CURRENT_DESKTOP", "XDG_SESSION_DESKTOP", "OMARCHY_PATH", "PATH", "BASH_ENV",
+                    *os.environ.get('OMADEV_SESSION_KEYS', '').split()], capture_output=True)
     # The compositor's own PID, from its lock file; the host finds our window by it.
     lock = RUNTIME_DIR / "hypr" / os.environ.get("HYPRLAND_INSTANCE_SIGNATURE", "") / "hyprland.lock"
     os.environ["OMADEV_PID"] = lock.read_text().split("\n", 1)[0].strip()
     keys = ["WAYLAND_DISPLAY", "DISPLAY", "HYPRLAND_INSTANCE_SIGNATURE", "DBUS_SESSION_BUS_ADDRESS", "OMARCHY_PATH", "PATH",
             "HOME", "XDG_CONFIG_HOME", "XDG_STATE_HOME", "XDG_DATA_HOME", "XDG_CACHE_HOME", "XDG_RUNTIME_DIR",
-            "XDG_CURRENT_DESKTOP"]
+            "XDG_CURRENT_DESKTOP", "BASH_ENV"]
+    keys += ['TERMINAL', 'EDITOR'] + os.environ.get('OMADEV_SESSION_KEYS', '').split()
     keys += sorted(k for k in os.environ if k.startswith("OMADEV_"))
+    keys = list(dict.fromkeys(keys))
     target = Path(os.environ["OMADEV_ENV_FILE"])
     tmp = target.with_suffix(".tmp")
-    tmp.write_text("".join(f"{k}={shlex.quote(os.environ[k])}\n" for k in keys if os.environ.get(k)))
+    tmp.write_text("".join(f"{k}={shlex.quote(os.environ[k])}\n" for k in keys if k in os.environ))
     tmp.replace(target)
     # The Wayland backend creates its output before the config's monitor rule
     # lands; a reload applies the WAYLAND-1 size.
@@ -1056,7 +1169,7 @@ def cmd_publish(_args: list[str]) -> int:
 
 # ---------------------------------------------------------------- setup
 
-BINDINGS_BLOCK = """
+LEGACY_BINDINGS_BLOCK = """
 -- omadev: Super + Alt + D opens the sessions panel in the bar. With a session
 -- window focused, Super + Shift + Alt + D hands it every key until the same
 -- chord is pressed again.
@@ -1066,6 +1179,23 @@ hl.define_submap("nested", function()
   hl.bind("SUPER + SHIFT + ALT + D", hl.dsp.submap("reset"), { description = "Release keys from the omadev session" })
 end)
 """
+IMMEDIATE_BINDINGS_BLOCK = """
+-- omadev: Super + Alt + D opens the sessions panel. Select a session to
+-- capture its keys; Super + Alt + D releases them again.
+o.bind("SUPER + ALT + D", "Omadev sessions", "omarchy-shell dry.omadev toggle")
+hl.define_submap("nested", function()
+  hl.bind("SUPER + ALT + D", hl.dsp.submap("reset"), { description = "Release keys from the omadev session" })
+end)
+"""
+HANDOFF_BINDINGS_BLOCK = """
+-- omadev: wait for key releases before changing keyboard routing.
+omadev_input = dofile((os.getenv("XDG_CONFIG_HOME") or (os.getenv("HOME") .. "/.config")) .. "/hypr/omadev-input.lua")
+o.bind("SUPER + ALT + D", "Omadev sessions", function() omadev_input.toggle_panel() end)
+hl.define_submap("nested", function()
+  hl.bind("SUPER + ALT + D", function() omadev_input.release() end, { description = "Release keys from the omadev session" })
+end)
+"""
+BINDINGS_BLOCK = IMMEDIATE_BINDINGS_BLOCK
 SKILL_DIRS = (".claude/skills", ".codex/skills", ".agents/skills")
 
 
@@ -1096,14 +1226,23 @@ def setup_widget() -> str:
 
 def setup_bindings() -> str:
     path = CONFIG_DIR / "hypr/bindings.lua"
-    if path.is_file() and re.search(r"^-- omadev:", path.read_text(), re.M):
-        return f"bindings already in {path}"
     path.parent.mkdir(parents=True, exist_ok=True)
-    with open(path, "a") as f:
-        f.write(BINDINGS_BLOCK)
+    text = path.read_text() if path.exists() else ""
+    updated = text
+    for old in (LEGACY_BINDINGS_BLOCK, HANDOFF_BINDINGS_BLOCK):
+        if old in updated:
+            updated = updated.replace(old, BINDINGS_BLOCK, 1)
+    if BINDINGS_BLOCK not in updated:
+        if re.search(r"^-- omadev:", updated, re.M):
+            return f"custom omadev bindings in {path}; update them manually"
+        updated += BINDINGS_BLOCK
+    if updated != text:
+        if path.exists():
+            shutil.copy2(path, path.with_name(f"{path.name}.bak.{time.time_ns()}"))
+        path.write_text(updated)
     with contextlib.suppress(OSError, subprocess.SubprocessError):
         subprocess.run(["hyprctl", "reload"], capture_output=True, timeout=10)
-    return f"bindings appended to {path} (Super+Alt+D: panel, Super+Shift+Alt+D: capture/release)"
+    return f"bindings ready in {path} (Super+Alt+D: panel/release)"
 
 
 def setup_skills() -> str:
@@ -1170,11 +1309,11 @@ def focused_slot() -> int | None:
 
 
 def cmd_focus(args: list[str]) -> int:
-    # Capture routes the user's keyboard into a nest. Only the user's own
-    # binding and the bar widget set this; an agent driving a nest never
-    # needs it and must not take the keyboard away from the user.
+    # Capture routes the user's keyboard into a nest. Only user actions in the
+    # widget set this flag automatically. An agent driving a nest must never
+    # take the keyboard away from the user.
     if os.environ.get("OMADEV_ALLOW_CAPTURE") != "1":
-        die("key capture is for the user at the keyboard (Super+Shift+Alt+D or the bar panel), not for "
+        die("key capture is for the user at the keyboard (the bar panel or session widget), not for "
             "scripts or agents: drive the nest with `omadev run N ...` and `omadev hyprctl N dispatch ...`")
     if args and is_slot(args[0]):
         slot = int(args[0])
@@ -1197,8 +1336,7 @@ def cmd_focus(args: list[str]) -> int:
         notify(f"Nested Omarchy {slot} has no window on the host yet")
         return 1
     subprocess.run([*ctl, "dispatch", f'hl.dsp.focus({{ window = "address:{address}" }})'], capture_output=True)
-    # Only capture keys if the window really took focus; a locked host ignores
-    # focus requests, and entering the submap then would strand the host.
+    # Verify focus with a separate compositor round trip before capturing.
     active = json.loads(subprocess.run([*ctl, "activewindow", "-j"], capture_output=True, text=True).stdout or "{}")
     if active.get("address") != address:
         notify(f"Could not focus nested Omarchy {slot} (host locked?)")

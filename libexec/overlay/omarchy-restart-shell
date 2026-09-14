@@ -4,6 +4,12 @@
 # running that config on any display, which is the host bar. This one only
 # touches instances on the current (nested) display and relaunches through the
 # nested compositor.
+case ${1:-} in
+  -h|--help) echo 'Usage: omarchy-restart-shell (restart only this nest)'; exit 0 ;;
+  '') ;;
+  *) echo 'omarchy-restart-shell (omadev): unexpected argument' >&2; exit 1 ;;
+esac
+[[ ${OMADEV_SLOT:-} =~ ^[1-9]$ ]] || { echo "not inside an omadev nest" >&2; exit 1; }
 [[ -n ${OMARCHY_PATH:-} && -f $OMARCHY_PATH/shell/shell.qml ]] ||
   { echo "Omarchy shell config not found: ${OMARCHY_PATH:-unset}/shell" >&2; exit 1; }
 [[ -n ${HYPRLAND_INSTANCE_SIGNATURE:-} ]] || { echo "not inside a nested Omarchy session" >&2; exit 1; }

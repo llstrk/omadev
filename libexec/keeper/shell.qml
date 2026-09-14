@@ -1,9 +1,9 @@
 // Per-nest helper, launched by the nested Hyprland on start.
 //
-// 1. Holds a Wayland idle inhibitor so the nested shell never starts its
-//    screensaver/lock cycle while the window sits unfocused (disabling idle
-//    through the shell would write the shared stay-awake file and switch the
-//    host's idle off too). OMADEV_IDLE=1 turns this off.
+// 1. Holds a Wayland idle inhibitor as an extra safeguard. The launcher also
+//    disables the shell's screensaver/lock cycle through the nest's private
+//    stay-awake state, so hidden surfaces cannot defeat idle prevention.
+//    OMADEV_IDLE=1 turns both safeguards off.
 // 2. Makes the nest follow its host window. The Wayland backend resizes the
 //    output when the host window is resized, but Hyprland neither re-arranges
 //    layers and windows nor tells its clients (wl_output keeps the old mode)

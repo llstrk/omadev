@@ -14,7 +14,7 @@ description: >
 desktop. A nest is a real Hyprland plus a real omarchy-shell on the same
 kernel and user: sysfs, hwmon, i2c and the system bus are the real hardware.
 Only the compositor, the session bus, the runtime dir (private, with the host's
-sockets linked in) and the Omarchy config (a private reflink clone per nest) are separate. Source and README: the directory `omadev --help` lives in (`readlink -f $(command -v omadev)`).
+sockets linked in), Omarchy/Hyprland config and Omarchy state (private reflink clones per nest) are separate. Source and README: the directory `omadev --help` lives in (`readlink -f $(command -v omadev)`).
 
 ## Rules
 
@@ -22,9 +22,18 @@ sockets linked in) and the Omarchy config (a private reflink clone per nest) are
   Omarchy config, so nothing you change in it reaches the host or other nests. `ensure`
   refuses a slot that belongs to someone else (another owner, or the user's own unowned session).
 - Never capture the user's keyboard: `omadev focus`, the bar widget's capture click and
-  Super+Shift+Alt+D are for the human at the machine. `focus` refuses without
+  Super+Alt+D are for the human at the machine. `focus` refuses without
   OMADEV_ALLOW_CAPTURE=1; do not set it. Drive a nest with `run`, `hyprctl N dispatch`,
   `shell` and `screenshot`; you never need the host's focus.
+- Prefer foreground tasks the user can see inside the nest. Open the actual app
+  for UI work; run builds, tests, servers and other substantial commands in a
+  visible session terminal, with progress and output left visible. Avoid hiding
+  the main work in headless `omadev run` calls, detached tmux sessions, `nohup`,
+  background jobs or log files alone. Quick probes, IPC, readiness checks and
+  genuinely background services are fine; use headless work when required or
+  explicitly requested. Launching a terminal asynchronously is fine: the task
+  itself should run in that terminal's foreground. Visibility never means
+  capturing host keys, switching the user's workspace, or stealing host focus.
 - Hardware writes inside a nest are real writes to this laptop. Keep power
   limit, DDC and similar write paths behind a dry-run flag unless the user
   asked for a live test, and never write the same device from two nests.
@@ -32,6 +41,8 @@ sockets linked in) and the Omarchy config (a private reflink clone per nest) are
   anything touching systemd user units from inside a nest. The host session
   may be locked; nests work fine while it is, and so do screenshots, but
   `focus` cannot move the host's focus.
+- Guards refuse `sudo`, `pkexec`, `systemctl` and known broad restart/app-theme helpers. Do not bypass them with absolute paths. Other app configs, caches, data and hardware are still shared: this is not a security sandbox.
+- `omarchy theme set` builds and reloads only the nest's desktop, skipping app/hardware hooks. Config refresh is restricted to the private `hypr/` and `omarchy/` trees.
 - Stop your nest when done and `clean` its home after you have taken what
   you need from `diff`.
 
@@ -41,9 +52,15 @@ sockets linked in) and the Omarchy config (a private reflink clone per nest) are
 # Claim a slot (idempotent). Prints JSON with the nest's environment.
 omadev ensure 3 --owner <your-name> [--path <omarchy checkout>] [--plugin <worktree>]
 
-# Drive it without focusing it
+# Put substantial work in a visible terminal (replace the project path).
+# The dispatcher returns immediately; the task runs in the terminal foreground.
+# --wait-after-command keeps its output visible after completion.
+omadev hyprctl 3 dispatch \
+  'hl.dsp.exec_cmd("ghostty --title=omadev-3-build-tests --wait-after-command=true -e bash -lc \"cd ~/Work/my-project && ./bin/build && ./bin/test\"")'
+
+# Drive apps and run quick probes without taking host focus
 omadev shell 3 <ipc-target> <method> [args]    # e.g. shell 3 shell listPlugins
-omadev run 3 <command...>                       # runs with the nest's env and private HOME
+omadev run 3 <command...>                       # quick probes with the nest's env and private HOME
 omadev run 3 omarchy restart shell              # reload only this nest's shell
 omadev hyprctl 3 clients -j
 omadev hyprctl 3 dispatch 'hl.dsp.exec_cmd("ghostty")'   # compositor actions
@@ -60,6 +77,8 @@ omadev list --json                              # all slots, owners, pids, paths
 
 ## Facts that save time
 
+- `--path` applies to Hyprland defaults, the shell, CLI commands and Bash aliases/functions. Checkout `default/uwsm/default` and user `~/.config/uwsm/default` are sourced at startup, not the full UWSM startup chain. Other interactive shells' startup files are not rewritten.
+- Hyprland config is now private too. Edit the path under the nest's `home` from `list --json`, then `omadev hyprctl N reload`. Host config edits apply to new nests, not existing ones.
 - Ready condition is `ensure` returning, or `shell N shell ping` answering
   `ok`. Do not sleep and guess.
 - A nest starts as a copy of the host's `~/.config/omarchy`, so every host
@@ -76,6 +95,13 @@ omadev list --json                              # all slots, owners, pids, paths
   the user's own: claim your own with `ensure N --owner <name>`.
 - Browsers: a nest has a fresh, empty Chromium-family profile, so the browser opens inside the nest
   (with no logins).
+- The nest's widget shows `mods: Super+Ctrl` (or `none` / `?`) for its compositor's
+  reported held modifier keys. Read `heldModifiers` and `modifierStateKnown` via
+  `omadev shell N dry.omadev status` when diagnosing stuck input. This is a
+  read-only key-down indicator, not a measurement of an app's internal modifier
+  state. Starting capture clears reported held modifier keys once, using key-up
+  events only; it does not continuously suppress modifiers. Do not capture the
+  user's keys to inspect or reset them.
 - Plugin QML errors appear in `log N` as `WARN qml: Plugin widget <id> failed: ...`.
 - Virtual-keyboard input (`run N wtype ...`) reaches the focused app but never
   fires the compositor's own bindings. To do what a SUPER binding would do,
@@ -90,9 +116,10 @@ omadev list --json                              # all slots, owners, pids, paths
   for 800x180 gets the whole nest when it is alone. A GUI test that depends on
   its window size (omareel's editor drag test) passes with another window open
   in the nest, or with a float rule in the nest's Hyprland config.
-- Full build + test suites run fine inside a nest: `omadev run N bash -lc 'cd
-  ~/Work/<repo> && ./bin/build && ./bin/test'` (the nest's HOME links your
-  real ~/Work).
+- Full build + test suites run fine inside a nest (its HOME links your real
+  ~/Work). Prefer the visible terminal workflow above so the user can follow
+  progress. `omadev run N bash -lc 'cd ~/Work/<repo> && ./bin/build && ./bin/test'`
+  is the headless alternative, not the default for substantial work.
 - The nest's private bus does not activate portals or at-spi (the host owns
   those and the Hyprland portal crashes against a nested compositor), so
   portal-based file dialogs and screen sharing are unavailable inside a nest.
