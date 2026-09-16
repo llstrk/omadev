@@ -1,0 +1,8 @@
+*.so
+__pycache__/
+evidence/
+native-evidence/
+hyprland.lua
+native-hyprland.lua
+publish.py
+publish-native.py
