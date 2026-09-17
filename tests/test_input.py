@@ -72,6 +72,14 @@ class InputSetupTests(unittest.TestCase):
                 fn()
             qml = (Path(tmp)/'omarchy/plugins/dry.omadev/Omadev.qml').read_text()
             self.assertIn('readonly property string hostLauncher: ' + json.dumps(str(MODULE.resolve())), qml)
+            directory = Path(tmp)/'omarchy/plugins/dry.omadev'
+            entry = json.loads((directory/'manifest.json').read_text())['entryPoints']['barWidget']
+            self.assertNotEqual(entry, 'Omadev.qml')
+            self.assertEqual((directory/entry).read_text(), qml)
+            with patch('subprocess.run') as run:
+                run.return_value.returncode = 0
+                fn()
+            self.assertEqual(json.loads((directory/'manifest.json').read_text())['entryPoints']['barWidget'], entry)
 
     def test_custom_bindings_are_not_overwritten(self):
         with tempfile.TemporaryDirectory() as tmp:
