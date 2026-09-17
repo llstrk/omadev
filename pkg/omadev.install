@@ -1,12 +1,14 @@
 post_install() {
   cat <<'MSG'
-omadev: the bar widget, the host key bindings and the agent skill live in your
-home. Set them up once as your user:   omadev setup
+omadev: configure host bindings and register this backend as your user: omadev setup
+Install the optional widget separately:
+  omarchy plugin add https://github.com/llstrk/omadev --enable
 MSG
 }
 
 post_upgrade() {
   cat <<'MSG'
-omadev: refresh the bar widget copy in your home:   omadev setup
+omadev: refresh host bindings and backend registration: omadev setup
+The git-managed widget updates independently: omarchy plugin update dry.omadev
 MSG
 }

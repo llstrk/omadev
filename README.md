@@ -15,23 +15,39 @@ hwmon, the system bus. Only the compositor and the session bus are separate.
 
 ## Install
 
+Install the widget through Omarchy's plugin manager:
+
 ```bash
-curl -fsSL https://raw.githubusercontent.com/llstrk/omadev/main/install.sh | bash
-omarchy restart shell
+omarchy plugin add https://github.com/llstrk/omadev --enable
 ```
 
-Or clone and run `./install.sh`. Either way the script links `omadev` into
-`~/.local/bin` and runs `omadev setup`, which does the three things that live
-in your home: it copies the bar widget into `~/.config/omarchy/plugins` and
-enables it, appends the host bindings below to `~/.config/hypr/bindings.lua`,
-and links the agent skill into `~/.claude/skills`, `~/.codex/skills` and
-`~/.agents/skills` where those exist. Nothing needs root, and `omadev setup`
-is idempotent: run it again after an update to refresh the widget copy.
-Running the script again updates a curl-installed copy in `~/.local/share/omadev`.
+The repository-root manifest points to `plugin/dry.omadev/Omadev.qml`. Loading the
+widget only probes for a backend. If none is available, the panel offers **Install
+Omadev backend**. A click opens a terminal and requires confirmation before building
+or changing host bindings. A compiler, pkg-config and Wayland 1.26+ development files
+must already be installed. No package-manager or privileged operation runs automatically.
 
-As a package (`pkg/PKGBUILD`, built for the Omarchy package repository), the
-code lands in `/usr/lib/omadev` with `/usr/bin/omadev` linked to it, and the
-post-install message asks you to run `omadev setup` once as your user.
+The button installs an independent backend snapshot under
+`~/.local/share/omadev/backends/`, links its launcher into `~/.local/bin`, and runs
+`omadev setup`. Plugin updates/removal cannot change or remove that backend. If an old
+or incompatible backend is found, the panel offers a compatible source installation;
+update the plugin first to get current backend sources. Existing backend snapshots
+are kept for rollback and may be removed manually once no session uses them.
+
+Alternatively, install the backend package and run `omadev setup`, or run
+`./install.sh` from a separate development checkout. The latter intentionally tracks
+that checkout. Running it from an installed plugin instead takes the independent
+snapshot/confirmation path. The package recipe is backend-only; a release archive
+containing this protocol still needs to be published before the package can use it.
+
+`omadev setup` now checks for the required native helper, configures host bindings,
+links agent skills, and writes `~/.config/omadev/backend.json`. It never copies,
+rewrites, enables, or deletes the widget. The widget uses that registration (then
+`~/.local/bin`, then PATH) and checks `omadev capabilities --json`; nested widgets pin
+their own session backend. An incompatible backend is never used for capture.
+
+Update the widget with `omarchy plugin update dry.omadev`. Backend installation and
+host setup remain explicit actions. See [installation ownership and migration](docs/plugin-install.md).
 
 The bindings `omadev setup` installs in `~/.config/hypr/bindings.lua`:
 
@@ -43,7 +59,7 @@ Normal release failures notify rather than silently bypassing cleanup. Run setup
 The bar widget `dry.omadev` (in `plugin/`) is the visual side. It must be a
 real directory under `~/.config/omarchy/plugins`: the shell watches that tree
 with `inotifywait -r`, which does not descend into symlinked directories, so a
-symlinked plugin never hot-reloads, which is why the installer copies it. On the host it is one icon,
+symlinked plugin never hot-reloads. The plugin manager owns the real git checkout. On the host it is one icon,
 lit while sessions run, that opens a panel of the open sessions: a row per
 session with focus-and-capture and stop actions, and a + button that
 starts a new session in the first free slot. The panel takes the keyboard:
@@ -362,12 +378,14 @@ omadev hyprctl 3 dispatch 'hl.dsp.exec_cmd("ghostty")'        # compositor-level
 ```
 bin/omadev                 launcher and every control command (Python 3, standard library only);
                                    its hidden `_publish` runs inside the nest on start to record the environment;
-                                   `setup` installs the user-level parts (widget copy, bindings, skill links)
+                                   `setup` checks/registers the backend, configures bindings and links skills
+manifest.json                     root manifest for omarchy plugin add
+plugin/dry.omadev/                 widget and its read-only backend probe/confirmed installer
 pkg/                               PKGBUILD and install script for the Omarchy package repository
 libexec/hyprland.lua               nested Hyprland config (wraps the private copy of your hyprland.lua)
 libexec/bash-env                   checkout-aware Bash bootstrap, used by BASH_ENV and private startup files
 libexec/overlay/                   CLI dispatch, safe refresh/theme/restart, launcher shims and host-command guards
-libexec/refuse-host-command        shared refusal implementation for guard symlinks
+libexec/refuse-host-command        refusal script mirrored as regular guard files (plugin repositories cannot contain symlinks)
 libexec/keeper/shell.qml           per-nest helper: idle inhibitor + follow-the-window resize
 libexec/input_gate.py              launcher-owned controller for keyboard isolation
 libexec/input-gate/                native host-Wayland keyboard filter, built by bin/build-input-gate

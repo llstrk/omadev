@@ -6,6 +6,7 @@ import Quickshell.Io
 import Quickshell.Wayland
 import qs.Commons
 import qs.Ui
+import qs.Ui as Ui
 
 // Companion widget for omadev. One plugin, two faces:
 //
@@ -34,9 +35,58 @@ Panel {
   readonly property string captureSubmap: String(setting("submap", "nested"))
   readonly property bool nested: hostSignature !== ""
   readonly property bool inputGated: Quickshell.env("OMADEV_INPUT_GATE") === "1"
-  // setup pins this value in the installed host copy; source-linked nests use OMADEV_ROOT.
-  readonly property string hostLauncher: "omadev"
-  readonly property string launcher: nested && Quickshell.env("OMADEV_ROOT") ? Quickshell.env("OMADEV_ROOT") + "/../bin/omadev" : hostLauncher
+  readonly property string backendHelper: decodeURIComponent(String(Qt.resolvedUrl("backend.py")).replace(/^file:\/\//, ""))
+  property var backendInfo: ({state: "checking", compatible: false, launcher: "", message: "Checking backend…"})
+  readonly property bool backendCompatible: backendInfo.compatible === true
+  readonly property bool backendReady: backendCompatible && launcher !== "" && backendInfo.state === "ready"
+  readonly property bool backendCanStart: backendCompatible && launcher !== "" && (backendInfo.state === "ready" || backendInfo.state === "unconfigured")
+  readonly property bool backendActionAvailable: !nested && (["missing", "incompatible", "build-required"].indexOf(backendInfo.state) !== -1 || (backendInfo.state === "unconfigured" && backendInfo.bindingsStatus !== "custom"))
+  readonly property string launcher: backendCompatible ? String(backendInfo.launcher || "") : ""
+  readonly property string backendActionLabel: backendInfo.state === "unconfigured" ? "Set up host bindings"
+    : (backendInfo.state === "missing" ? "Install Omadev backend" : "Install compatible backend")
+
+  function applyBackend(raw) {
+    var previousLauncher = launcher
+    var wasCompatible = backendCompatible
+    try {
+      var info = JSON.parse(raw)
+      if (!info || typeof info.state !== "string" || typeof info.compatible !== "boolean") throw new Error("Invalid backend status")
+      backendInfo = info
+    }
+    catch (e) { backendInfo = {state:"unavailable", compatible:false, launcher:"", message:"Backend discovery failed. Check that Python 3 is installed, then retry."} }
+    if (backendCompatible) {
+      if ((!wasCompatible || previousLauncher !== launcher) && !listProc.running) listProc.running = true
+    } else if (backendInfo.state !== "unavailable") {
+      sessions = []; runningCount = 0; loaded = false
+    }
+  }
+  function runBackendAction() {
+    // Only an explicit click/keyboard activation opens a terminal. No IPC action,
+    // automatic install, privileged process, or nested host-setup side effect.
+    if (nested || !bar || !backendActionAvailable) return
+    var action = backendInfo.state === "unconfigured" ? "setup" : "install"
+    var command = "python3 " + Util.shellQuote(backendHelper) + " " + action
+      + "; status=$?; printf '\\nPress Enter to close this terminal.'; read -r answer; exit \"$status\""
+    bar.run("omarchy launch terminal bash -c " + Util.shellQuote(command))
+    close()
+  }
+  Process {
+    id: backendProbe
+    command: ["python3", root.backendHelper, "probe"]
+    stdout: StdioCollector { onStreamFinished: root.applyBackend(text) }
+    onExited: function(code) { if (code !== 0) root.applyBackend("") }
+  }
+  Timer {
+    interval: root.backendReady ? 30000 : 5000
+    running: true
+    repeat: true
+    triggeredOnStart: true
+    onTriggered: if (!backendProbe.running) backendProbe.running = true
+  }
+  onLauncherChanged: {
+    inputGateProbe.running = false
+    if (inputGated) inputGateState = "unavailable"
+  }
   property string inputGateState: inputGated ? "unavailable" : "legacy"
   readonly property bool capturePending: inputGated && inputGateState === "pending"
 
@@ -59,7 +109,7 @@ Panel {
   }
   Timer {
     interval: 1000
-    running: root.nested && root.inputGated
+    running: root.nested && root.inputGated && root.backendCompatible
     repeat: true
     triggeredOnStart: true
     onTriggered: if (!inputGateProbe.running) inputGateProbe.running = true
@@ -279,16 +329,17 @@ Panel {
   }
 
   function releaseKeys() {
-    if (!root.bar || !nested) return
+    if (!root.bar || !nested || !backendCompatible) return
     root.bar.run(Util.shellQuote(root.launcher) + " release")
   }
 
   function toggleCapture() {
     if (captured || capturePending) releaseKeys()
-    else if (slot !== "" && root.bar) root.bar.run("env OMADEV_ALLOW_CAPTURE=1 " + Util.shellQuote(root.launcher) + " focus " + slot)
+    else if (backendReady && slot !== "" && root.bar) root.bar.run("env OMADEV_ALLOW_CAPTURE=1 " + Util.shellQuote(root.launcher) + " focus " + slot)
   }
 
   function focusSlot(n) {
+    if (!backendReady) return
     for (var i = 0; i < sessions.length; i++)
       if (String(sessions[i].slot) === String(n) && sessions[i].state === "running") {
         if (root.bar) root.bar.run("env OMADEV_ALLOW_CAPTURE=1 " + Util.shellQuote(root.launcher) + " focus " + n)
@@ -298,6 +349,7 @@ Panel {
   }
 
   function stopSlot(n) {
+    if (!backendCompatible) return
     pendingFocus = ""
     pendingStop = ""
     markStopping(n)
@@ -334,6 +386,7 @@ Panel {
   }
 
   function startSession() {
+    if (!backendCanStart) return
     pendingFocus = ""
     pendingStop = ""
     // Use the same installed launcher for starting, capturing and releasing.
@@ -353,12 +406,13 @@ Panel {
   }
 
   function refresh() {
+    if (!backendCompatible && !backendProbe.running) backendProbe.running = true
     if (nested) {
       if (!queryProc.running) queryProc.running = true
       if (ownPid === "" && !pidProc.running) pidProc.running = true
       refreshActive()
     }
-    if (!listProc.running) listProc.running = true
+    if (backendCompatible && !listProc.running) listProc.running = true
   }
 
   function applySubmapName(raw) {
@@ -540,6 +594,8 @@ Panel {
     hostWindows = []
     hostMonitors = []
     if (opened) {
+      // Detect a newly registered backend immediately on the next user action.
+      if (!backendProbe.running) backendProbe.running = true
       refresh()
       if (!nested && !windowsProc.running) windowsProc.running = true
       selectedIndex = availableIndex(0)
@@ -569,6 +625,10 @@ Panel {
         passthrough: root.passthrough,
         focused: root.focused,
         captured: root.captured,
+        backend: root.backendInfo,
+        backendReady: root.backendReady,
+        backendCanStart: root.backendCanStart,
+        backendActionAvailable: root.backendActionAvailable,
         inputGate: root.inputGateState,
         capturePending: root.capturePending,
         heldModifiers: root.heldModifiers,
@@ -1118,7 +1178,7 @@ Panel {
         root.cursorActive = true
         if (dy !== 0) root.moveCursor(dy)
       }
-      onActivateRequested: if (root.cursorActive) root.activateCursor()
+      onActivateRequested: { if (!root.backendReady) root.runBackendAction(); else if (root.cursorActive) root.activateCursor() }
       onCloseRequested: root.close()
       onTabRequested: function(direction) { root.switchPanel(direction) }
       onDeleteRequested: root.stopSelected()
@@ -1157,7 +1217,8 @@ Panel {
             foreground: root.bar.foreground
             fontFamily: root.bar.fontFamily
             title: "Omadev"
-            meta: !root.loaded ? "LOADING…"
+            meta: !root.backendReady ? "BACKEND " + String(root.backendInfo.state).toUpperCase()
+              : !root.loaded ? "LOADING…"
               : (root.sessions.length === 0 ? "NO SESSION RUNNING"
                 : root.sessions.length + (root.sessions.length === 1 ? " SESSION" : " SESSIONS") + " RUNNING")
             iconComponent: Component {
@@ -1172,6 +1233,7 @@ Panel {
             trailingControl: Component {
               PanelActionButton {
                 iconText: "󰐕"
+                enabled: root.backendCanStart
                 tooltipText: "Start a new session in the first free slot (n)"
                 foreground: root.bar.foreground
                 fontFamily: root.bar.fontFamily
@@ -1182,8 +1244,36 @@ Panel {
 
           PanelSeparator { foreground: root.bar.foreground }
 
+          Column {
+            visible: !root.backendReady
+            width: parent.width
+            spacing: Style.space(8)
+            Text {
+              width: parent.width
+              textFormat: Text.PlainText
+              wrapMode: Text.WordWrap
+              text: String(root.backendInfo.message || "Backend unavailable.")
+                + "\nInstallation/setup requires confirmation in a visible terminal. The widget checkout is not modified."
+              color: root.bar.foreground
+              font.family: root.bar.fontFamily
+              font.pixelSize: Style.font.body
+            }
+            Ui.Button {
+              text: root.backendActionLabel
+              visible: root.backendActionAvailable
+              bordered: true
+              foreground: root.bar.foreground
+              onClicked: root.runBackendAction()
+            }
+            Ui.Button {
+              text: "Recheck backend"
+              foreground: root.bar.foreground
+              onClicked: if (!backendProbe.running) backendProbe.running = true
+            }
+          }
+
           Text {
-            visible: root.loaded && root.sessions.length === 0
+            visible: root.backendCanStart && root.loaded && root.sessions.length === 0
             width: parent.width
             textFormat: Text.StyledText
             wrapMode: Text.WordWrap
@@ -1301,7 +1391,7 @@ Panel {
       PanelActionButton {
         iconText: "󰌌"
         tooltipText: "Focus session " + row.slotText + " and capture keys for it (Enter)"
-        enabled: !row.stopping
+        enabled: !row.stopping && root.backendReady
         foreground: root.bar.foreground
         fontFamily: root.bar.fontFamily
         onClicked: root.focusSlot(row.slotText)
@@ -1310,7 +1400,7 @@ Panel {
       PanelActionButton {
         iconText: "󰅖"
         tooltipText: row.session.state === "starting" ? "Starting…" : (row.stopping ? "Stopping…" : "Stop session " + row.slotText + " (d)")
-        enabled: !row.stopping
+        enabled: !row.stopping && root.backendCompatible
         foreground: root.bar.foreground
         hoverColor: root.bar ? root.bar.urgent : Color.urgent
         fontFamily: root.bar.fontFamily

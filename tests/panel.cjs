@@ -7,12 +7,17 @@ const qml = fs.readFileSync(path.join(__dirname, '../plugin/dry.omadev/Omadev.qm
 // Evaluate the actual readonly expressions, not just mocked captured values.
 const expression = name => qml.match(new RegExp('readonly property (?:bool|string) ' + name + ': ([^\\n]+)'))[1];
 const bindingCtx = vm.createContext({nested:true, passthrough:true, focused:true, inputGated:true,
-  inputGateState:'captured', hostLauncher:'/installed/bin/omadev', Quickshell:{env: name => name === 'OMADEV_ROOT' ? '/checkout/libexec' : ''}});
-assert.equal(vm.runInContext(expression('launcher'), bindingCtx), '/checkout/libexec/../bin/omadev');
-bindingCtx.inputGated = false;
-assert.equal(vm.runInContext(expression('launcher'), bindingCtx), '/checkout/libexec/../bin/omadev');
-bindingCtx.nested = false;
-assert.equal(vm.runInContext(expression('launcher'), bindingCtx), '/installed/bin/omadev');
+  inputGateState:'captured', backendCompatible:true, backendInfo:{launcher:'/registered/bin/omadev'}});
+assert.equal(vm.runInContext(expression('launcher'), bindingCtx), '/registered/bin/omadev');
+bindingCtx.backendCompatible = false;
+assert.equal(vm.runInContext(expression('launcher'), bindingCtx), '');
+bindingCtx.backendCompatible = true;
+bindingCtx.launcher = '/registered/bin/omadev';
+bindingCtx.backendInfo.state = 'unconfigured';
+assert.equal(vm.runInContext(expression('backendCanStart'), bindingCtx), true);
+assert.equal(vm.runInContext(expression('backendReady'), bindingCtx), false);
+bindingCtx.backendInfo.state = 'build-required';
+assert.equal(vm.runInContext(expression('backendCanStart'), bindingCtx), false);
 for (const state of ['captured','pending','uncaptured','revoked','unavailable']) {
   bindingCtx.inputGated = true; bindingCtx.inputGateState = state;
   assert.equal(vm.runInContext(expression('captured'), bindingCtx), state === 'captured');
@@ -28,6 +33,37 @@ const tooltipCtx = vm.createContext({root:{slot:'2', captured:false, passthrough
 assert.ok(vm.runInContext(tooltip, tooltipCtx).includes('host keys are blocked here'));
 tooltipCtx.root.inputGateState = 'unavailable';
 assert.ok(vm.runInContext(tooltip, tooltipCtx).includes('input status is unknown'));
+const installEvents = [];
+const installCtx = vm.createContext({nested:false, backendInfo:{state:'missing'}, backendCompatible:false,
+  backendHelper:'/trusted checkout/backend.py', bar:{run:command=>installEvents.push(command)},
+  Util:{shellQuote:value=>JSON.stringify(value)}, close:()=>installEvents.push('close'),
+  sessions:[], runningCount:0, loaded:false, listProc:{running:false}});
+Object.defineProperty(installCtx, 'backendCompatible', {get:()=>installCtx.backendInfo.compatible === true});
+Object.defineProperty(installCtx, 'launcher', {get:()=>vm.runInContext(expression('launcher'), installCtx)});
+Object.defineProperty(installCtx, 'backendActionAvailable', {get:()=>vm.runInContext(expression('backendActionAvailable'), installCtx)});
+for (const name of ['runBackendAction','applyBackend']) {
+  const start = qml.indexOf('  function ' + name + '(');
+  vm.runInContext(qml.slice(start, qml.indexOf('\n  }', start) + 4), installCtx);
+}
+installCtx.applyBackend(JSON.stringify({state:'missing',compatible:false,launcher:''}));
+assert.deepEqual(installEvents, []); // Loading/probing never starts installation.
+installCtx.runBackendAction();
+assert.ok(installEvents[0].startsWith('omarchy launch terminal bash -c '));
+assert.ok(installEvents[0].includes(' install;'));
+assert.equal(installEvents[1], 'close');
+installEvents.length = 0;
+installCtx.nested = true; installCtx.runBackendAction();
+assert.deepEqual(installEvents, []); // Never perform host setup from a nest widget.
+installCtx.nested = false;
+installCtx.sessions = [{slot:2,state:'running'}]; installCtx.loaded = true;
+installCtx.applyBackend(JSON.stringify({state:'unavailable',compatible:false,launcher:'/backend'}));
+assert.equal(installCtx.sessions.length, 1); // Preserve the last list during transient errors.
+assert.equal(installCtx.loaded, true);
+installCtx.runBackendAction();
+assert.deepEqual(installEvents, []); // Never offer installation as timeout recovery.
+installCtx.applyBackend(JSON.stringify({state:'unconfigured',compatible:true,launcher:'/backend',bindingsStatus:'custom'}));
+installCtx.runBackendAction();
+assert.deepEqual(installEvents, []); // No unwinnable automatic setup loop for custom bindings.
 const focused = [], stopped = [];
 const ctx = vm.createContext({
   sessions: [
@@ -37,6 +73,7 @@ const ctx = vm.createContext({
   ],
   selectedIndex: 0, pendingStop: '', pendingFocus: '', stopRequests: {}, runningCount: 2,
   Color: {foreground: '#ffffff'}, clearModifiersOnSnapshot: false,
+  backendReady:true, backendCanStart:true, backendCompatible:true,
   capturePending: false, inputGated: false, inputGateState: 'legacy',
   opened: true, selectedScreen: null, focusAfterSelection: {restart() {}, stop() {}}, flashSelection() {},
   initialSelectionPending: false, hostSnapshotReady: true, loaded: true, hostWindows: [],
@@ -133,6 +170,7 @@ assert.equal(stopped.length, 1);
 const stopEvents = [];
 const stopContext = vm.createContext({
   opened: true, nested: false, pendingFocus: 'pending', markStopping() {},
+  backendReady:true, backendCanStart:true, backendCompatible:true,
   armRetake: () => stopEvents.push('retain-focus'),
   Util: {shellQuote: value => JSON.stringify(value)},
   root: {launcher:'/installed copy/bin/omadev', nested:false, bar: {run: command => stopEvents.push(command)}},
@@ -154,6 +192,14 @@ stopContext.close = () => stopEvents.push('close');
 stopEvents.length = 0;
 stopContext.focusSlot(2);
 assert.deepEqual(stopEvents, ['env OMADEV_ALLOW_CAPTURE=1 "/installed copy/bin/omadev" focus 2', 'close']);
+stopContext.backendReady = false;
+stopEvents.length = 0;
+stopContext.startSession(); stopContext.focusSlot(2);
+assert.deepEqual(stopEvents, ['"/installed copy/bin/omadev" start --detach', 'retain-focus', 'refresh']);
+stopContext.backendCanStart = false;
+stopEvents.length = 0;
+stopContext.startSession(); stopContext.focusSlot(2);
+assert.deepEqual(stopEvents, []);
 assert.equal(stopContext.pendingFocus, '');
 const snapshot = [1, 2, 3].map(slot => ({slot, pid: 100 + slot, started_at: 10, state: 'running'}));
 ctx.sessions = snapshot;

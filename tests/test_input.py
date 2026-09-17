@@ -62,17 +62,6 @@ class InputSetupTests(unittest.TestCase):
             self.assertEqual(len(found), 1)
             self.assertEqual(found[0][1].resolve(), MODULE.resolve())
 
-    def test_installed_host_widget_is_pinned_to_setup_launcher(self):
-        with tempfile.TemporaryDirectory() as tmp:
-            module = runpy.run_path(str(MODULE))
-            fn = module['setup_widget']
-            fn.__globals__['CONFIG_DIR'] = Path(tmp)
-            with patch('subprocess.run') as run:
-                run.return_value.returncode = 0
-                fn()
-            qml = (Path(tmp)/'omarchy/plugins/dry.omadev/Omadev.qml').read_text()
-            self.assertIn('readonly property string hostLauncher: ' + json.dumps(str(MODULE.resolve())), qml)
-
     def test_custom_bindings_are_not_overwritten(self):
         with tempfile.TemporaryDirectory() as tmp:
             module = runpy.run_path(str(MODULE))

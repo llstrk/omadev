@@ -81,6 +81,9 @@ omadev list --json                              # all slots, owners, pids, paths
 - Hyprland config is now private too. Edit the path under the nest's `home` from `list --json`, then `omadev hyprctl N reload`. Host config edits apply to new nests, not existing ones.
 - Ready condition is `ensure` returning, or `shell N shell ping` answering
   `ok`. Do not sleep and guess.
+- The widget is installed/updated with `omarchy plugin add/update`. `omadev setup`
+  owns backend readiness, registration and host bindings, never the widget checkout.
+  For this repository, pass its root to `--plugin`, not `plugin/dry.omadev`.
 - A nest starts as a copy of the host's `~/.config/omarchy`, so every host
   plugin is already there; you only need `--plugin` to swap one for your own
   checkout. `--plugin <dir>` links the checkout into the nest under its

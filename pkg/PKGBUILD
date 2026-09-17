@@ -29,10 +29,10 @@ build() {
 
 package() {
   cd "$pkgname-$pkgver"
-  # The launcher finds libexec, plugin and skill next to its own real path.
+  # Backend only. The widget is owned by omarchy plugin add/update.
   install -Dm755 bin/omadev "$pkgdir/usr/lib/omadev/bin/omadev"
   install -Dm755 bin/build-input-gate "$pkgdir/usr/lib/omadev/bin/build-input-gate"
-  cp -r libexec plugin skill "$pkgdir/usr/lib/omadev/"
+  cp -r libexec skill "$pkgdir/usr/lib/omadev/"
   install -d "$pkgdir/usr/bin"
   ln -s ../lib/omadev/bin/omadev "$pkgdir/usr/bin/omadev"
   install -Dm644 README.md "$pkgdir/usr/share/doc/$pkgname/README.md"

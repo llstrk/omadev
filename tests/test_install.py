@@ -33,7 +33,7 @@ class InstallTests(unittest.TestCase):
             script(source/'bin/omadev', 'test "$1" = setup && touch "$HOME/setup-ran"')
             for tool in ('cc', 'pkg-config'): script(tools/tool, 'exit 0')
             result = subprocess.run(['bash', str(source/'install.sh')], capture_output=True, text=True,
-                                    env={**os.environ, 'HOME':str(home), 'CC':'cc' if toolchain else '/missing/test-compiler',
+                                    env={**{k:v for k,v in os.environ.items() if k != 'OMADEV_SLOT'}, 'HOME':str(home), 'CC':'cc' if toolchain else '/missing/test-compiler',
                                          'PATH':str(tools)+':/usr/bin'}, timeout=10)
             self.assertNotEqual(result.returncode, 0)
             self.assertIn('required input-gate build failed' if toolchain else 'installation requires', result.stderr)
