@@ -1,0 +1,27 @@
+#!/bin/bash
+# Run in a visible terminal inside an owned input-gate-integration nest.
+set -euo pipefail
+[[ ${OMADEV_OWNER:-} == input-gate-integration && -n ${OMADEV_SLOT:-} &&
+   ${HYPRLAND_INSTANCE_SIGNATURE:-} != "${OMADEV_HOST_SIG:-}" ]] || {
+  echo 'Run inside an owned input-gate-integration nest, not the host.' >&2; exit 1;
+}
+cd "$(dirname "$0")/.."
+./bin/build-input-gate
+python -m unittest discover -s tests -p 'test_*.py' -v
+node tests/panel.cjs
+python -u tests/input-gate-integration.py
+mkdir -p test-results/proxy-lifecycle
+cc -Wall -Wextra -Werror -Wno-unused-parameter \
+  tests/fixtures/input-gate/proxy-lifecycle.c -o test-results/proxy-lifecycle/Hyprland \
+  $(pkg-config --cflags --libs wayland-client wayland-server)
+OMADEV_KEYBOARD_GATE="$PWD/test-results/proxy-lifecycle/lease" \
+OMADEV_ORIGINAL_LD_PRELOAD="${LD_PRELOAD:-}" \
+LD_PRELOAD="$PWD/libexec/input-gate/keyboard-gate.so${LD_PRELOAD:+:$LD_PRELOAD}" \
+  test-results/proxy-lifecycle/Hyprland
+python - <<'PY'
+import json
+from pathlib import Path
+state=json.loads(Path('test-results/proxy-lifecycle/lease.status').read_text())
+assert state['keyboards']==0 and state['forwarded']==0, state
+print('PASS: no stale keyboard objects remain in the native watchdog')
+PY

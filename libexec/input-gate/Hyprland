@@ -1,0 +1,9 @@
+#!/bin/bash
+# start-hyprland --path invokes this after the private D-Bus/watchdog starts.
+# Only the compositor receives the gate preload, never those parent processes.
+set -euo pipefail
+: "${OMADEV_ROOT:?}" "${OMADEV_INPUT_GATE_DIR:?}" "${OMADEV_GATE_COMPOSITOR:?}"
+export OMADEV_KEYBOARD_GATE="$OMADEV_INPUT_GATE_DIR/lease"
+export OMADEV_ORIGINAL_LD_PRELOAD="${LD_PRELOAD:-}"
+export LD_PRELOAD="$OMADEV_ROOT/input-gate/keyboard-gate.so${LD_PRELOAD:+:$LD_PRELOAD}"
+exec "$OMADEV_GATE_COMPOSITOR" "$@"

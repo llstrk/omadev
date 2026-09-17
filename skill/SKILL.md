@@ -95,11 +95,18 @@ omadev list --json                              # all slots, owners, pids, paths
   the user's own: claim your own with `ensure N --owner <name>`.
 - Browsers: a nest has a fresh, empty Chromium-family profile, so the browser opens inside the nest
   (with no logins).
+- `--input-gate` opts into source-level host keyboard isolation. Build the helper with
+  `bin/build-input-gate` first. `omadev input-status N` reports the real gate state;
+  `uncaptured` is normal for agent-driven tests, and virtual input still works.
+  Never invoke the gate's internal capture control socket against the real host.
+  Human capture needs this version's `omadev setup` release binding. The native gate
+  and launcher controller survive nest-local shell restarts. The old one-shot
+  modifier-clearing workaround is disabled for gated sessions.
 - The nest's widget shows `mods: Super+Ctrl` (or `none` / `?`) for its compositor's
   reported held modifier keys. Read `heldModifiers` and `modifierStateKnown` via
   `omadev shell N dry.omadev status` when diagnosing stuck input. This is a
   read-only key-down indicator, not a measurement of an app's internal modifier
-  state. Starting capture clears reported held modifier keys once, using key-up
+  state. In legacy sessions, starting capture clears reported held modifier keys once, using key-up
   events only; it does not continuously suppress modifiers. Do not capture the
   user's keys to inspect or reset them.
 - Plugin QML errors appear in `log N` as `WARN qml: Plugin widget <id> failed: ...`.

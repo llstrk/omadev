@@ -15,6 +15,17 @@ else
 fi
 echo "omadev source: $src"
 
+if command -v "${CC:-cc}" >/dev/null && command -v pkg-config >/dev/null && pkg-config --exists 'wayland-client >= 1.26' 'wayland-server >= 1.26'; then
+  if ! "$src/bin/build-input-gate"; then
+    # Do not accidentally enable an older helper against the updated launcher.
+    rm -f "$src/libexec/input-gate/keyboard-gate.so"
+    echo "omadev: optional input-gate build failed; continuing legacy installation. Rebuild before using --input-gate." >&2
+  fi
+else
+  rm -f "$src/libexec/input-gate/keyboard-gate.so"
+  echo "omadev: optional --input-gate needs a C compiler, pkg-config and Wayland 1.26+ headers; build later with $src/bin/build-input-gate" >&2
+fi
+
 mkdir -p "$HOME/.local/bin"
 ln -sfn "$src/bin/omadev" "$HOME/.local/bin/omadev"
 exec "$src/bin/omadev" setup

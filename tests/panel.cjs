@@ -4,6 +4,30 @@ const fs = require('node:fs');
 const vm = require('node:vm');
 const path = require('node:path');
 const qml = fs.readFileSync(path.join(__dirname, '../plugin/dry.omadev/Omadev.qml'), 'utf8');
+// Evaluate the actual readonly expressions, not just mocked captured values.
+const expression = name => qml.match(new RegExp('readonly property (?:bool|string) ' + name + ': ([^\\n]+)'))[1];
+const bindingCtx = vm.createContext({nested:true, passthrough:true, focused:true, inputGated:true,
+  inputGateState:'captured', hostLauncher:'/installed/bin/omadev', Quickshell:{env: name => name === 'OMADEV_ROOT' ? '/checkout/libexec' : ''}});
+assert.equal(vm.runInContext(expression('launcher'), bindingCtx), '/checkout/libexec/../bin/omadev');
+bindingCtx.inputGated = false;
+assert.equal(vm.runInContext(expression('launcher'), bindingCtx), '/checkout/libexec/../bin/omadev');
+bindingCtx.nested = false;
+assert.equal(vm.runInContext(expression('launcher'), bindingCtx), '/installed/bin/omadev');
+for (const state of ['captured','pending','uncaptured','revoked','unavailable']) {
+  bindingCtx.inputGated = true; bindingCtx.inputGateState = state;
+  assert.equal(vm.runInContext(expression('captured'), bindingCtx), state === 'captured');
+}
+bindingCtx.inputGateState = 'captured'; bindingCtx.focused = false;
+assert.equal(vm.runInContext(expression('captured'), bindingCtx), false);
+bindingCtx.focused = true; bindingCtx.passthrough = false;
+assert.equal(vm.runInContext(expression('captured'), bindingCtx), false);
+const face = qml.slice(qml.indexOf('  // Nest face.'));
+const tooltip = face.slice(face.indexOf('tooltipText:') + 'tooltipText:'.length, face.indexOf('    onPressed:'));
+const tooltipCtx = vm.createContext({root:{slot:'2', captured:false, passthrough:true, focused:true,
+  inputGated:true, inputGateState:'revoked', modifierLabel:()=> 'mods: none'}});
+assert.ok(vm.runInContext(tooltip, tooltipCtx).includes('host keys are blocked here'));
+tooltipCtx.root.inputGateState = 'unavailable';
+assert.ok(vm.runInContext(tooltip, tooltipCtx).includes('input status is unknown'));
 const focused = [], stopped = [];
 const ctx = vm.createContext({
   sessions: [
@@ -13,6 +37,7 @@ const ctx = vm.createContext({
   ],
   selectedIndex: 0, pendingStop: '', pendingFocus: '', stopRequests: {}, runningCount: 2,
   Color: {foreground: '#ffffff'}, clearModifiersOnSnapshot: false,
+  capturePending: false, inputGated: false, inputGateState: 'legacy',
   opened: true, selectedScreen: null, focusAfterSelection: {restart() {}, stop() {}}, flashSelection() {},
   initialSelectionPending: false, hostSnapshotReady: true, loaded: true, hostWindows: [],
   hostMonitors: [{id: 1, focused: true, activeWorkspace: {id: 4}, specialWorkspace: {id: 0}}],
@@ -27,6 +52,11 @@ ctx.applyModifierState('Ctrl,Super,Super,ignored');
 assert.equal(ctx.modifierLabel(), 'mods: Super+Ctrl');
 ctx.slot = '3'; ctx.labelTier = 'icon'; ctx.captured = false;
 assert.ok(ctx.nestLabel().includes('mods: Super+Ctrl'));
+ctx.inputGated = true; ctx.capturePending = true;
+assert.ok(ctx.nestLabel().includes('RELEASE HELD KEYS'));
+ctx.capturePending = false; ctx.inputGateState = 'unavailable';
+assert.ok(ctx.nestLabel().includes('INPUT STATUS UNKNOWN'));
+ctx.inputGated = false; ctx.inputGateState = 'legacy';
 ctx.applyModifierState('');
 assert.equal(ctx.modifierLabel(), 'mods: none');
 ctx.modifierStateKnown = false;
@@ -104,13 +134,26 @@ const stopEvents = [];
 const stopContext = vm.createContext({
   opened: true, nested: false, pendingFocus: 'pending', markStopping() {},
   armRetake: () => stopEvents.push('retain-focus'),
-  root: {bar: {run: command => stopEvents.push(command)}},
+  Util: {shellQuote: value => JSON.stringify(value)},
+  root: {launcher:'/installed copy/bin/omadev', nested:false, bar: {run: command => stopEvents.push(command)}},
   refreshSoon: {restart: () => stopEvents.push('refresh')},
 });
 const stopStart = qml.indexOf('  function stopSlot(n) {');
 vm.runInContext(qml.slice(stopStart, qml.indexOf('\n  }', stopStart) + 4), stopContext);
 stopContext.stopSlot(2);
-assert.deepEqual(stopEvents, ['retain-focus', 'omadev stop 2', 'refresh']);
+assert.deepEqual(stopEvents, ['retain-focus', '"/installed copy/bin/omadev" stop 2', 'refresh']);
+for (const name of ['startSession', 'focusSlot']) {
+  const start = qml.indexOf('  function ' + name + '(');
+  vm.runInContext(qml.slice(start, qml.indexOf('\n  }', start) + 4), stopContext);
+}
+stopEvents.length = 0;
+stopContext.startSession();
+assert.deepEqual(stopEvents, ['"/installed copy/bin/omadev" start --detach', 'retain-focus', 'refresh']);
+stopContext.sessions = [{slot:2, state:'running'}];
+stopContext.close = () => stopEvents.push('close');
+stopEvents.length = 0;
+stopContext.focusSlot(2);
+assert.deepEqual(stopEvents, ['env OMADEV_ALLOW_CAPTURE=1 "/installed copy/bin/omadev" focus 2', 'close']);
 assert.equal(stopContext.pendingFocus, '');
 const snapshot = [1, 2, 3].map(slot => ({slot, pid: 100 + slot, started_at: 10, state: 'running'}));
 ctx.sessions = snapshot;

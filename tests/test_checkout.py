@@ -92,7 +92,7 @@ PATH=/usr/bin
                          [str(self.overlay), str(self.checkout / 'bin'), '/foreign/bin', '/usr/bin'])
 
     def test_initial_environment_selects_checkout_before_hyprland(self):
-        ns = SimpleNamespace(reuse=False, owner='test', scale='1', place='workspace', no_shell=False, idle=False)
+        ns = SimpleNamespace(reuse=False, owner='test', scale='1', place='workspace', no_shell=False, idle=False, input_gate=False)
         with patch.object(omadev, 'make_home', return_value=self.home), \
                 patch.object(omadev, 'make_runtime', return_value=self.base / 'runtime'), \
                 patch.object(omadev, 'session_defaults', side_effect=lambda env: env), \
@@ -124,7 +124,7 @@ PATH=/usr/bin
         target = records / '9/session.env'
         target.parent.mkdir(parents=True)
         write(runtime / 'hypr/nested/hyprland.lock', '12345\n')
-        env = {**self.env, 'HYPRLAND_INSTANCE_SIGNATURE': 'nested',
+        env = {**self.env, 'HYPRLAND_INSTANCE_SIGNATURE': 'nested', 'OMADEV_INPUT_GATE': '0',
                'OMADEV_ENV_FILE': str(target), 'OMADEV_SESSION_KEYS': 'EMPTY MULTILINE',
                'OMADEV_SESSION_UNSET': 'REMOVED DISPLAY', 'EMPTY': '', 'MULTILINE': 'one\ntwo=three'}
         with patch.dict(os.environ, env, clear=True), patch.object(omadev, 'RUNTIME_DIR', runtime), \

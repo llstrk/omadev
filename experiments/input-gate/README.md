@@ -2,7 +2,7 @@
 
 Development worktree: `/home/dry/Work/omadev-input-gate`, branch `input-gate`.
 
-This is an experimental native Wayland keyboard filter, not yet connected to Omadev's launcher, capture UI, or packaging. The worktree starts from committed `main` at `335bace`; it deliberately does not include the original checkout's uncommitted changes.
+This directory preserves the original feasibility prototype. The opt-in implementation is now in `libexec/input-gate/` and `libexec/input_gate.py`, connected to the launcher, capture UI, and build/package recipes. See `docs/input-gate.md` for current usage and validation. The files and report below are historical, not the production implementation. The worktree starts from committed `main` at `335bace`; it deliberately does not include the original checkout's uncommitted changes.
 
 ## Files
 

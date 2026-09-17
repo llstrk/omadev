@@ -23,7 +23,7 @@ omarchy restart shell
 Or clone and run `./install.sh`. Either way the script links `omadev` into
 `~/.local/bin` and runs `omadev setup`, which does the three things that live
 in your home: it copies the bar widget into `~/.config/omarchy/plugins` and
-enables it, appends the two host bindings below to `~/.config/hypr/bindings.lua`,
+enables it, appends the host bindings below to `~/.config/hypr/bindings.lua`,
 and links the agent skill into `~/.claude/skills`, `~/.codex/skills` and
 `~/.agents/skills` where those exist. Nothing needs root, and `omadev setup`
 is idempotent: run it again after an update to refresh the widget copy.
@@ -33,14 +33,12 @@ As a package (`pkg/PKGBUILD`, built for the Omarchy package repository), the
 code lands in `/usr/lib/omadev` with `/usr/bin/omadev` linked to it, and the
 post-install message asks you to run `omadev setup` once as your user.
 
-The bindings the installer appends to `~/.config/hypr/bindings.lua`:
+The bindings `omadev setup` installs in `~/.config/hypr/bindings.lua`:
 
-```lua
-o.bind("SUPER + ALT + D", "Omadev sessions", "omarchy-shell dry.omadev toggle")
-hl.define_submap("nested", function()
-  hl.bind("SUPER + ALT + D", hl.dsp.submap("reset"), { description = "Release keys from the omadev session" })
-end)
-```
+- **Super+Alt+D** opens the sessions panel, or releases captured input through the absolute path to this launcher. It does not depend on the compositor finding the right `omadev` on PATH.
+- **Super+Shift+Alt+D**, while captured, is an explicit emergency escape. The compositor resets routing directly and attempts a warning notification. This bypasses key-cleanup acknowledgement; stop the nest if keys remain held.
+
+Normal release failures notify rather than silently bypassing cleanup. Run setup to generate the bindings for your installation path, and restart existing nests after upgrading.
 
 The bar widget `dry.omadev` (in `plugin/`) is the visual side. It must be a
 real directory under `~/.config/omarchy/plugins`: the shell watches that tree
@@ -75,7 +73,7 @@ or `mods: ?` when unavailable. A larger box below the release hint shows individ
 modifier labels, with held keys highlighted in the theme color. The box remains
 visible after release if any modifiers still appear held. It reports the nested compositor's key-down state
 for Super, Ctrl, Alt, Shift and AltGr, not the host's physical keyboard or an
-app's internal modifier state. When capture starts, the widget takes a fresh
+app's internal modifier state. In legacy (ungated) sessions, when capture starts, the widget takes a fresh
 snapshot and sends key-up events for reported held modifier keys to that nest,
 after verifying it still has host focus and capture. It sends no key-downs and
 does not keep clearing modifiers during normal typing. Capture/release timing
@@ -106,6 +104,7 @@ omadev                                  # lowest free slot, installed /usr/share
 omadev start 2 --path ~/Projects/omarchy   # slot 2 runs a checkout
 omadev --scale 1.25                     # HiDPI nest; the size always follows the window
 omadev --no-shell                       # compositor only
+omadev start 2 --input-gate              # opt-in: block host keys until explicit capture; automation still works
 omadev list                             # the nine slots
 omadev start --detach                   # return once the nest's shell answers (start otherwise blocks)
 omadev log 2 -f                         # follow nest 2's shell and app output (not the compositor's)
@@ -122,7 +121,7 @@ Super+Alt+D opens the sessions panel; each row focuses its nest and captures
 keys for it. Super+Alt+D releases captured keys. The keyboard icon on a panel
 row focuses and captures that session; the icon inside a session toggles capture.
 Capture focuses the window and verifies focus in a separate compositor round trip
-before entering passthrough. Release resets the host submap immediately.
+before entering passthrough. `omadev release` waits for any gated session to release forwarded keys before resetting the host submap. With only legacy sessions, it resets routing directly.
 Capture is for the person at the keyboard: `omadev focus` refuses unless
 `OMADEV_ALLOW_CAPTURE=1` is explicitly set. The widget sets it for user actions
 and offers no capture method over its IPC interface. Ctrl-C in the launching terminal or `omadev stop N` ends a
@@ -168,6 +167,12 @@ OMADEV_ALLOW_CAPTURE=1 omadev focus 2   # focus nest 2 and capture keys (user-on
 ```
 
 Nested-only Hyprland config goes in `~/.config/hypr/omadev.lua`; it is copied into each new nest and loaded after the normal config. Edit the nest's private copy for live changes, or start a fresh nest to pick up host edits.
+
+## Opt-in keyboard isolation
+
+`--input-gate` blocks host keyboard events before Hyprland processes them, while preserving virtual test input. Capture waits for pre-held keys to be released. Focus loss or controller failure revokes capture; merely returning focus cannot recapture. The nested widget reports the actual gate state, including `RELEASE HELD KEYS` and `INPUT STATUS UNKNOWN`. Unknown status is not a guarantee that input is blocked.
+
+Build with `./bin/build-input-gate`, or use the installer/package build. Human capture requires the updated `omadev setup` release binding. `omadev input-status N` and `list --json` expose readiness/state. Startup refuses to silently run unguarded if the native helper fails to initialize. This remains opt-in pending physical keyboard testing; see [input gate design, tests, and rollout](docs/input-gate.md).
 
 ## Every nest has its own home and runtime dir
 
@@ -363,5 +368,7 @@ libexec/bash-env                   checkout-aware Bash bootstrap, used by BASH_E
 libexec/overlay/                   CLI dispatch, safe refresh/theme/restart, launcher shims and host-command guards
 libexec/refuse-host-command        shared refusal implementation for guard symlinks
 libexec/keeper/shell.qml           per-nest helper: idle inhibitor + follow-the-window resize
+libexec/input_gate.py              launcher-owned controller for opt-in keyboard isolation
+libexec/input-gate/                native host-Wayland keyboard filter, built by bin/build-input-gate
 tests/                            disposable checkout/environment tests and panel behavior tests
 ```

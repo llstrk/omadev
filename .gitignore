@@ -1,2 +1,5 @@
 __pycache__/
 *.pyc
+/libexec/input-gate/*.so
+/libexec/input-gate/*.so.tmp.*
+/test-results/

@@ -1,0 +1,19 @@
+#!/bin/bash
+# Build atomically so a running nest never maps a partly overwritten library.
+set -euo pipefail
+root=$(cd "$(dirname "$0")/.." && pwd)
+output="$root/libexec/input-gate/keyboard-gate.so"
+pkg-config --exists 'wayland-client >= 1.26' 'wayland-server >= 1.26' || {
+  echo 'Input gate requires Wayland 1.26+ development headers and libraries.' >&2
+  exit 1
+}
+tmp="$output.tmp.$$"
+trap 'rm -f "$tmp"' EXIT
+read -r -a cflags <<< "${CFLAGS:--O2 -g}"
+read -r -a ldflags <<< "${LDFLAGS:-}"
+read -r -a wayland <<< "$(pkg-config --cflags --libs wayland-client wayland-server)"
+"${CC:-cc}" "${cflags[@]}" -Wall -Wextra -Werror -Wno-unused-parameter \
+  -shared -fPIC "$root/libexec/input-gate/keyboard-gate.c" \
+  -o "$tmp" "${ldflags[@]}" -ldl "${wayland[@]}"
+mv "$tmp" "$output"
+printf 'Built %s\n' "$output"

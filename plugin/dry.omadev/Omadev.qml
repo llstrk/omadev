@@ -33,6 +33,37 @@ Panel {
   readonly property string home: Quickshell.env("HOME") || ""
   readonly property string captureSubmap: String(setting("submap", "nested"))
   readonly property bool nested: hostSignature !== ""
+  readonly property bool inputGated: Quickshell.env("OMADEV_INPUT_GATE") === "1"
+  // setup pins this value in the installed host copy; source-linked nests use OMADEV_ROOT.
+  readonly property string hostLauncher: "omadev"
+  readonly property string launcher: nested && Quickshell.env("OMADEV_ROOT") ? Quickshell.env("OMADEV_ROOT") + "/../bin/omadev" : hostLauncher
+  property string inputGateState: inputGated ? "unavailable" : "legacy"
+  readonly property bool capturePending: inputGated && inputGateState === "pending"
+
+  Process {
+    id: inputGateProbe
+    command: [root.launcher, "input-status", "--watch"]
+    stdout: SplitParser {
+      onRead: function(line) {
+        try { root.inputGateState = JSON.parse(line).state || "unavailable" }
+        catch (e) { root.inputGateState = "unavailable" }
+        inputGateWatchdog.restart()
+      }
+    }
+    onExited: function(code) { root.inputGateState = "unavailable" }
+  }
+  Timer {
+    id: inputGateWatchdog
+    interval: 600
+    onTriggered: root.inputGateState = "unavailable"
+  }
+  Timer {
+    interval: 1000
+    running: root.nested && root.inputGated
+    repeat: true
+    triggeredOnStart: true
+    onTriggered: if (!inputGateProbe.running) inputGateProbe.running = true
+  }
 
   // The nest face shrinks with the session's width so the bar's centre block
   // (clock, weather) does not run into it when the window is tiled narrow.
@@ -75,7 +106,9 @@ Panel {
 
   function nestLabel() {
     var head = "󰌌 " + (slot !== "" ? slot : "")
-    if (labelTier === "compact") head += "  " + (captured ? "CAPTURING" : "capture")
+    if (capturePending) head += "  RELEASE HELD KEYS"
+    else if (inputGated && inputGateState === "unavailable") head += "  INPUT STATUS UNKNOWN"
+    else if (labelTier === "compact") head += "  " + (captured ? "CAPTURING" : "capture")
     else if (labelTier === "full") head += "  " + (captured ? "CAPTURING KEYS" : "click to capture input")
     // Keep the diagnostic visible even on small, icon-only nests.
     return head + "  ·  " + modifierLabel()
@@ -94,9 +127,9 @@ Panel {
     if (nested && !passthrough && focused) pulseCaptureFeedback(false)
   }
   readonly property bool focused: ownPid !== "" && hostActivePid === ownPid
-  readonly property bool captured: passthrough && focused
+  readonly property bool captured: passthrough && focused && (!inputGated || inputGateState === "captured")
   onCapturedChanged: {
-    clearModifiersOnSnapshot = nested && captured
+    clearModifiersOnSnapshot = nested && captured && !inputGated
     if (nested && captured) {
       // Query fresh guest state first, rather than replaying a stale UI label.
       if (!modifierProbe.running) modifierProbe.running = true
@@ -247,18 +280,18 @@ Panel {
 
   function releaseKeys() {
     if (!root.bar || !nested) return
-    root.bar.run(hostctl("dispatch " + Util.shellQuote('hl.dsp.submap("reset")')))
+    root.bar.run(Util.shellQuote(root.launcher) + " release")
   }
 
   function toggleCapture() {
-    if (captured) releaseKeys()
-    else if (slot !== "" && root.bar) root.bar.run("env OMADEV_ALLOW_CAPTURE=1 omadev focus " + slot)
+    if (captured || capturePending) releaseKeys()
+    else if (slot !== "" && root.bar) root.bar.run("env OMADEV_ALLOW_CAPTURE=1 " + Util.shellQuote(root.launcher) + " focus " + slot)
   }
 
   function focusSlot(n) {
     for (var i = 0; i < sessions.length; i++)
       if (String(sessions[i].slot) === String(n) && sessions[i].state === "running") {
-        if (root.bar) root.bar.run("env OMADEV_ALLOW_CAPTURE=1 omadev focus " + n)
+        if (root.bar) root.bar.run("env OMADEV_ALLOW_CAPTURE=1 " + Util.shellQuote(root.launcher) + " focus " + n)
         close()
         return
       }
@@ -271,7 +304,7 @@ Panel {
     // Closing the nest can move compositor focus before the next list refresh.
     // Arm first, just as for starting a session, so d d keeps the panel open.
     if (opened && !nested) armRetake()
-    if (root.bar) root.bar.run("omadev stop " + n)
+    if (root.bar) root.bar.run(Util.shellQuote(root.launcher) + " stop " + n)
     refreshSoon.restart()
   }
 
@@ -303,8 +336,8 @@ Panel {
   function startSession() {
     pendingFocus = ""
     pendingStop = ""
-    // Prefer the user's installed launcher over an older distribution copy.
-    if (root.bar && !nested) root.bar.run('PATH="$HOME/.local/bin:$PATH" omadev start --detach')
+    // Use the same installed launcher for starting, capturing and releasing.
+    if (root.bar && !nested) root.bar.run(Util.shellQuote(root.launcher) + " start --detach")
     if (opened) armRetake()
     refreshSoon.restart()
   }
@@ -522,7 +555,7 @@ Panel {
     function close(): void { root.close() }
     function show(): void { root.open() }
     function hide(): void { root.close() }
-    function toggle(): void { if (root.nested) { if (root.captured) root.releaseKeys() } else root.toggle() }
+    function toggle(): void { if (root.nested) { if (root.captured || root.capturePending) root.releaseKeys() } else root.toggle() }
     function state(): string { return status() }
 
     function status(): string {
@@ -536,6 +569,8 @@ Panel {
         passthrough: root.passthrough,
         focused: root.focused,
         captured: root.captured,
+        inputGate: root.inputGateState,
+        capturePending: root.capturePending,
         heldModifiers: root.heldModifiers,
         heldModifierCodes: root.heldModifierCodes,
         modifierStateKnown: root.modifierStateKnown,
@@ -599,7 +634,7 @@ Panel {
 
   Process {
     id: listProc
-    command: ["omadev", "list", "--json"]
+    command: [root.launcher, "list", "--json"]
     stdout: StdioCollector {
       waitForEnd: true
       onStreamFinished: root.applyList(text)
@@ -922,10 +957,15 @@ Panel {
     tooltipText: (root.slot !== "" ? "Session " + root.slot + ": " : "")
       + (root.captured
         ? "the host is passing every key here. Click to release (Super+Alt+D)."
-        : (root.passthrough
-          ? "the host is passing keys to another session. Click to capture them here."
-          : "keys go to the host. Click to capture them here, or select this session in the host panel."))
-      + "\nNest " + root.modifierLabel() + ". Read-only key state reported by the nested compositor, not the host. Starting capture clears reported held modifiers with key-up events only."
+        : (root.inputGated && root.inputGateState === "unavailable"
+          ? "input status is unknown. Release with Super+Alt+D; emergency escape: Super+Shift+Alt+D."
+          : (root.inputGated && root.passthrough && root.focused
+            ? "host keys are blocked here. Click to capture, or release routing with Super+Alt+D."
+            : (root.passthrough
+              ? "the host is passing keys to another session. Click to capture them here."
+              : "keys go to the host. Click to capture them here, or select this session in the host panel."))))
+      + "\nNest " + root.modifierLabel() + ". Read-only key state reported by the nested compositor, not the host."
+      + (root.inputGated ? " Host keys are blocked until explicit capture; release held keys when prompted." : " Starting capture clears reported held modifiers with key-up events only.")
     onPressed: function() { root.toggleCapture() }
   }
 

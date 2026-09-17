@@ -31,6 +31,8 @@ from pathlib import Path
 SELF = Path(os.path.realpath(__file__))
 TREE = SELF.parent.parent          # the checkout, or /usr/lib/omadev when packaged
 ROOT = TREE / "libexec"
+sys.path.insert(0, str(ROOT))
+from input_gate import Controller as GateController, native_status as gate_status, request as gate_request
 CONFIG_DIR = Path(os.environ.get("XDG_CONFIG_HOME") or Path.home() / ".config")
 RUNTIME_DIR = Path(os.environ.get("XDG_RUNTIME_DIR") or f"/run/user/{os.getuid()}")
 RUN_DIR = RUNTIME_DIR / "omadev"
@@ -60,6 +62,8 @@ Usage:
   omadev list [--json]             The nine slots (free|starting|running|stopping|unreachable); --json adds each nest's environment
   omadev focus [N]                 Focus nest N on the host and capture keys (no N: the focused nest);
                                    user-only: needs OMADEV_ALLOW_CAPTURE=1, which the binding and widget set
+  omadev release                  Close gated input with acknowledgement, then release host key routing
+  omadev input-status [N] [--watch] Native gate readiness/state; --watch streams with one persistent reader
   omadev run [N] <command...>      Run a command with nest N's environment (and its private HOME)
   omadev hyprctl [N] <args...>     hyprctl against nest N
   omadev shell [N] <args...>       omarchy-shell IPC against nest N's shell
@@ -83,6 +87,7 @@ Start options:
   --place <mode>   workspace: the nest joins the host workspace named omadev without stealing focus (default)
                    tile: leave the window where the host's layout puts it   (env: OMADEV_PLACE)
   --no-shell       Compositor only
+  --input-gate     Opt in to host keyboard isolation until explicit capture (requires built native helper)
   --idle           Let the nested shell run its idle/screensaver/lock cycle (default: disabled)
   --reuse          Keep this slot's previous private home instead of cloning a fresh one
   --plugin <dir>   Link a plugin checkout (e.g. a git worktree) into the nest's plugins under its
@@ -279,6 +284,8 @@ def slot_json(slot: int) -> dict:
         "omarchy_path": env.get("OMARCHY_PATH"),
         "home": env.get("OMADEV_HOME") or None,
         "plugins": linked_plugins(sb),
+        "input_gate": gate_status(Path(env["OMADEV_INPUT_GATE_DIR"]), int(env["OMADEV_PID"]))
+            if env.get("OMADEV_INPUT_GATE") == "1" else {"state": "legacy"},
         "started_at": started,
         "env": env,
     }
@@ -559,7 +566,7 @@ def cmd_clean(args: list[str]) -> int:
 def parse_start(argv: list[str]) -> argparse.Namespace:
     p = argparse.ArgumentParser(prog="omadev start", add_help=False)
     p.add_argument("slot", nargs="?")
-    for flag in ("detach", "no-shell", "idle", "reuse", "help"):
+    for flag in ("detach", "no-shell", "idle", "reuse", "help", "input-gate"):
         p.add_argument("--" + flag, action="store_true")
     p.add_argument("--sandbox", action="store_true", help=argparse.SUPPRESS)  # former option; every nest is one now
     p.add_argument("--reuse-sandbox", dest="reuse", action="store_true", help=argparse.SUPPRESS)
@@ -594,6 +601,8 @@ def validate_start(ns: argparse.Namespace) -> tuple[Path, list[Path]]:
     for rel in ("bin/omarchy", "default/hypr/bootstrap.lua", "shell/shell.qml"):
         (path / rel).is_file() or die(f"{path} is not an Omarchy source tree (no {rel})")
     ns.size and die("--size is not supported: a nest always follows the size of its host window")
+    if ns.input_gate and not (ROOT / "input-gate/keyboard-gate.so").is_file():
+        die(f"input gate is not built; run: {TREE}/bin/build-input-gate")
     plugins = [Path(os.path.realpath(p)) for p in ns.plugin]
     for plugin in plugins:
         plugin_id(plugin)
@@ -695,7 +704,9 @@ def nest_environment(slot: int, ns: argparse.Namespace, path: Path, plugins: lis
     env.update(OMADEV_HOME=str(sb), HOME=str(sb), XDG_CONFIG_HOME=str(sb / ".config"),
                XDG_STATE_HOME=str(sb / ".local/state"), XDG_DATA_HOME=str(sb / ".local/share"),
                XDG_CACHE_HOME=str(sb / ".cache"), XDG_RUNTIME_DIR=str(make_runtime(slot)),
-               OMADEV_HOST_RUNTIME=str(RUNTIME_DIR))
+               OMADEV_HOST_RUNTIME=str(RUNTIME_DIR), OMADEV_HOST_HOME=str(Path.home()),
+               OMADEV_HOST_CONFIG=str(CONFIG_DIR),
+               OMADEV_HOST_BUS=os.environ.get("DBUS_SESSION_BUS_ADDRESS", ""))
     env.update(
         OMARCHY_PATH=str(path),
         OMADEV_OMARCHY_PATH=str(path),
@@ -708,6 +719,8 @@ def nest_environment(slot: int, ns: argparse.Namespace, path: Path, plugins: lis
         OMADEV_PLACE=ns.place,
         OMADEV_NO_SHELL="1" if ns.no_shell else "0",
         OMADEV_IDLE="1" if ns.idle else "0",
+        OMADEV_INPUT_GATE="1" if ns.input_gate else "0",
+        OMADEV_INPUT_GATE_DIR=str(RUN_DIR / str(slot) / "input-gate") if ns.input_gate else "",
         OMADEV_HOST=os.environ["WAYLAND_DISPLAY"],
         OMADEV_HOST_SIG=os.environ.get("HYPRLAND_INSTANCE_SIGNATURE", ""),
         PATH=checkout_path(path, os.environ.get('PATH', '/usr/local/bin:/usr/bin')),
@@ -937,6 +950,13 @@ def launch_compositor(slot: int, env: dict[str, str], extra: list[str]) -> subpr
     # shows a permanent "started without start-hyprland" banner. Own process
     # group, so a stalled compositor tree can be killed as a whole.
     launcher = ["start-hyprland", "--"] if shutil.which("start-hyprland") else ["Hyprland"]
+    if env.get("OMADEV_INPUT_GATE") == "1":
+        library = str(ROOT / "input-gate/keyboard-gate.so")
+        if re.search(r"[\s:]", library):
+            die("input gate library path cannot contain spaces or colons (LD_PRELOAD limitation)")
+        wrapper = str(ROOT / "input-gate/Hyprland")
+        env = {**env, "OMADEV_GATE_COMPOSITOR": shutil.which("Hyprland") or "Hyprland"}
+        launcher = ["start-hyprland", "--path", wrapper, "--"] if shutil.which("start-hyprland") else [wrapper]
     return subprocess.Popen(["dbus-run-session", f"--config-file={private_bus_config(slot)}", "--",
                              *launcher, "-c", str(ROOT / "hyprland.lua"), *extra], env=env, start_new_session=True)
 
@@ -1013,6 +1033,11 @@ def sweep_nest(slot: int) -> None:
 def run_foreground(slot: int, env: dict[str, str], extra: list[str]) -> int:
     hold_lock_as_launcher()
     child: subprocess.Popen | None = None
+    gate = None
+    if env.get("OMADEV_INPUT_GATE") == "1":
+        gate = GateController(Path(env["OMADEV_INPUT_GATE_DIR"]),
+                              lambda: read_env(slot).get("OMADEV_PID"),
+                              lambda: gate_host_snapshot(env)).start()
     cancelled = False
 
     def interrupt(*_):
@@ -1050,6 +1075,8 @@ def run_foreground(slot: int, env: dict[str, str], extra: list[str]) -> int:
         watch_window(slot, child, env)
         return child.returncode
     finally:
+        if gate is not None:
+            gate.stop()
         if child is not None:
             if child.poll() is None:
                 end_compositor(child)
@@ -1071,7 +1098,7 @@ def start_detached(slot: int, argv: list[str], ns: argparse.Namespace) -> int:
     # ours: a digit that was an option value must not be mistaken for the slot.
     child_argv = [sys.executable, str(SELF), "start", str(slot), "--owner", ns.owner, "--path", ns.path,
                   "--scale", ns.scale, "--place", ns.place]
-    child_argv += [f"--{flag}" for flag in ("no-shell", "idle", "reuse") if getattr(ns, flag.replace("-", "_"))]
+    child_argv += [f"--{flag}" for flag in ("no-shell", "idle", "reuse", "input-gate") if getattr(ns, flag.replace("-", "_"))]
     for plugin in ns.plugin:
         child_argv += ["--plugin", plugin]
     if ns.extra:
@@ -1127,6 +1154,8 @@ def cmd_ensure(argv: list[str]) -> int:
         ns, env = parse_start(rest), read_env(slot)
         if env.get("OMARCHY_PATH") != os.path.realpath(ns.path):
             die(f"nest {slot} is running {env.get('OMARCHY_PATH')}, not {os.path.realpath(ns.path)}; stop it first")
+        if ns.input_gate and env.get("OMADEV_INPUT_GATE") != "1":
+            die(f"nest {slot} was started without --input-gate; stop it first")
         if env.get("OMADEV_OWNER", "") != ns.owner:
             die(f"nest {slot} belongs to {env.get('OMADEV_OWNER') or 'the user'}, not {ns.owner or 'an unnamed caller'}; "
                 "pass its --owner or pick another slot")
@@ -1151,6 +1180,11 @@ def cmd_publish(_args: list[str]) -> int:
     # The compositor's own PID, from its lock file; the host finds our window by it.
     lock = RUNTIME_DIR / "hypr" / os.environ.get("HYPRLAND_INSTANCE_SIGNATURE", "") / "hyprland.lock"
     os.environ["OMADEV_PID"] = lock.read_text().split("\n", 1)[0].strip()
+    if os.environ.get("OMADEV_INPUT_GATE") == "1":
+        directory = Path(os.environ["OMADEV_INPUT_GATE_DIR"])
+        if not wait_until(lambda: gate_status(directory, int(os.environ["OMADEV_PID"]))['state'] != 'unavailable', 5):
+            subprocess.run(["hyprctl", "dispatch", "hl.dsp.exit()"], capture_output=True)
+            die("native input gate did not become ready; refusing an unguarded session")
     keys = ["WAYLAND_DISPLAY", "DISPLAY", "HYPRLAND_INSTANCE_SIGNATURE", "DBUS_SESSION_BUS_ADDRESS", "OMARCHY_PATH", "PATH",
             "HOME", "XDG_CONFIG_HOME", "XDG_STATE_HOME", "XDG_DATA_HOME", "XDG_CACHE_HOME", "XDG_RUNTIME_DIR",
             "XDG_CURRENT_DESKTOP", "BASH_ENV"]
@@ -1195,8 +1229,31 @@ hl.define_submap("nested", function()
   hl.bind("SUPER + ALT + D", function() omadev_input.release() end, { description = "Release keys from the omadev session" })
 end)
 """
-BINDINGS_BLOCK = IMMEDIATE_BINDINGS_BLOCK
+PATH_RELEASE_BINDINGS_BLOCK = IMMEDIATE_BINDINGS_BLOCK.replace('hl.dsp.submap("reset")', 'hl.dsp.exec_cmd("omadev release")')
+RELEASE_DISPATCH = "hl.dsp.exec_cmd(" + json.dumps(shlex.quote(str(SELF)) + " release", ensure_ascii=False) + ")"
+BINDINGS_BLOCK = IMMEDIATE_BINDINGS_BLOCK.replace('hl.dsp.submap("reset")', RELEASE_DISPATCH).replace(
+    '\nend)\n', '''
+  -- Emergency escape deliberately bypasses acknowledgement. Normal release above stays fail-closed.
+  hl.bind("SUPER + SHIFT + ALT + D", function()
+    hl.dispatch(hl.dsp.submap("reset"))
+    hl.dispatch(hl.dsp.exec_cmd("notify-send -u critical 'Omadev emergency release' 'Host shortcuts restored without confirming nest key cleanup. Stop the nest if keys remain held.'"))
+  end, { description = "Emergency release: bypass nest key cleanup acknowledgement" })
+end)
+''')
 SKILL_DIRS = (".claude/skills", ".codex/skills", ".agents/skills")
+
+
+def installed_binding_blocks(text: str):
+    """Recognize only our complete template, allowing its launcher path to move."""
+    command = json.dumps(shlex.quote(str(SELF)) + " release", ensure_ascii=False)
+    pattern = re.escape(BINDINGS_BLOCK).replace(re.escape(command), r'(?P<command>"(?:[^"\\]|\\.)*")')
+    for match in re.finditer(pattern, text):
+        try:
+            argv = shlex.split(json.loads(match['command']))
+        except (ValueError, TypeError):
+            continue
+        if len(argv) == 2 and argv[1] == 'release' and Path(argv[0]).is_absolute() and Path(argv[0]).name == 'omadev':
+            yield match.group(), Path(argv[0])
 
 
 def widget_dir() -> Path:
@@ -1212,6 +1269,10 @@ def setup_widget() -> str:
     dst.parent.mkdir(parents=True, exist_ok=True)
     shutil.rmtree(dst, ignore_errors=True)
     shutil.copytree(src, dst)
+    # Bind the host widget to the same launcher as its release binding, not PATH.
+    qml = dst / "Omadev.qml"
+    qml.write_text(qml.read_text().replace('readonly property string hostLauncher: "omadev"',
+                    'readonly property string hostLauncher: ' + json.dumps(str(SELF), ensure_ascii=False)))
     quiet = dict(capture_output=True, timeout=10)
     with contextlib.suppress(OSError, subprocess.SubprocessError):
         subprocess.run(["omarchy-shell", "shell", "rescanPlugins"], **quiet)
@@ -1229,7 +1290,9 @@ def setup_bindings() -> str:
     path.parent.mkdir(parents=True, exist_ok=True)
     text = path.read_text() if path.exists() else ""
     updated = text
-    for old in (LEGACY_BINDINGS_BLOCK, HANDOFF_BINDINGS_BLOCK):
+    for old, _launcher in list(installed_binding_blocks(updated)):
+        updated = updated.replace(old, BINDINGS_BLOCK, 1)
+    for old in (LEGACY_BINDINGS_BLOCK, HANDOFF_BINDINGS_BLOCK, IMMEDIATE_BINDINGS_BLOCK, PATH_RELEASE_BINDINGS_BLOCK):
         if old in updated:
             updated = updated.replace(old, BINDINGS_BLOCK, 1)
     if BINDINGS_BLOCK not in updated:
@@ -1297,7 +1360,7 @@ def cmd_list(args: list[str]) -> int:
 
 def notify(msg: str) -> None:
     if shutil.which("omarchy-notification-send"):
-        subprocess.run(["omarchy-notification-send", "-u", "low", msg], capture_output=True)
+        subprocess.run(["omarchy-notification-send", "-u", "low", msg], capture_output=True, timeout=3)
     print(f"omadev: {msg}", file=sys.stderr)
 
 
@@ -1308,6 +1371,114 @@ def focused_slot() -> int | None:
     return next((n for n in SLOTS if slot_alive(n) and read_env(n).get("OMADEV_PID") == pid), None)
 
 
+def gate_host_snapshot(env: dict[str, str]) -> tuple[str, str]:
+    ctl = ["hyprctl", "-i", env["OMADEV_HOST_SIG"]]
+    active = subprocess.run([*ctl, "activewindow", "-j"], capture_output=True, text=True, timeout=.2, check=True)
+    submap = subprocess.run([*ctl, "submap"], capture_output=True, text=True, timeout=.2, check=True)
+    return str(json.loads(active.stdout or "{}").get("pid", "")), submap.stdout.strip()
+
+
+@contextlib.contextmanager
+def capture_lock():
+    RUN_DIR.mkdir(parents=True, exist_ok=True)
+    with (RUN_DIR / "capture.lock").open("a") as lock:
+        fcntl.flock(lock, fcntl.LOCK_EX)
+        yield
+
+
+def forward_input_command(command: str, args: list[str]) -> int | None:
+    if not os.environ.get("OMADEV_SLOT") or not os.environ.get("OMADEV_HOST_SIG"):
+        return None
+    env = dict(os.environ)
+    env["HYPRLAND_INSTANCE_SIGNATURE"] = env["OMADEV_HOST_SIG"]
+    env["XDG_RUNTIME_DIR"] = env["OMADEV_HOST_RUNTIME"]
+    if command == "focus" and env.get("OMADEV_INPUT_GATE") == "1" and not env.get("OMADEV_HOST_CONFIG"):
+        die("restart this gated nest to record its host configuration before capture")
+    for saved, target in (("OMADEV_HOST_HOME", "HOME"), ("OMADEV_HOST_CONFIG", "XDG_CONFIG_HOME"),
+                          ("OMADEV_HOST_BUS", "DBUS_SESSION_BUS_ADDRESS")):
+        if saved in env:
+            value = env.pop(saved)
+            if value:
+                env[target] = value
+            else:
+                env.pop(target, None)
+    # Resolve slot records in the immediate parent, not the nest's private runtime.
+    for key in ("OMADEV_SLOT", "OMADEV_HOST_SIG", "OMADEV_HOST_RUNTIME"):
+        env.pop(key, None)
+    return subprocess.call([sys.executable, str(SELF), command, *args], env=env)
+
+
+def release_gate_records():
+    for slot in SLOTS:
+        record = read_env(slot)
+        if record.get("OMADEV_INPUT_GATE") != "1":
+            continue
+        health = slot_health(slot, record)
+        if health == "unreachable":
+            die(f"nest {slot}: cannot verify gated input in this environment; routing unchanged")
+        if health != "alive":
+            continue
+        directory = Path(record["OMADEV_INPUT_GATE_DIR"])
+        try:
+            gate_request(directory, "release")
+        except (OSError, RuntimeError, ValueError) as error:
+            # A dead controller's lease must still be revoked. Never reset host
+            # routing until the compositor acknowledges releasing forwarded keys.
+            (directory / "lease").unlink(missing_ok=True)
+            def closed():
+                state = gate_status(directory, int(record["OMADEV_PID"]))
+                return state.get("state") == "uncaptured" and state.get("forwarded") == 0
+            if not wait_until(closed, 2):
+                die(f"nest {slot}: cannot confirm input release ({error}); routing unchanged")
+
+
+def cmd_input_status(args: list[str]) -> int:
+    watch = "--watch" in args
+    args = [arg for arg in args if arg != "--watch"]
+    if len(args) > 1 or (args and not is_slot(args[0])):
+        die("input-status accepts [N] [--watch]")
+    if not args and os.environ.get("OMADEV_INPUT_GATE") == "1":
+        directory = Path(os.environ["OMADEV_INPUT_GATE_DIR"])
+        state = gate_status(directory)
+    else:
+        record = read_env(pick_slot(args[0] if args else None))
+        state = gate_status(Path(record["OMADEV_INPUT_GATE_DIR"]), int(record["OMADEV_PID"])) \
+            if record.get("OMADEV_INPUT_GATE") == "1" else {"state": "legacy"}
+    if not watch:
+        print(json.dumps(state))
+        return 0
+    # One persistent reader, not a fresh Python launcher per widget poll.
+    # Pin the PID: replacing a nest must not turn this reader into its observer.
+    pid = state.get("pid")
+    while True:
+        if pid is None:
+            pid = state.get("pid")
+        print(json.dumps(state), flush=True)
+        time.sleep(.2)
+        if not args and os.environ.get("OMADEV_INPUT_GATE") == "1":
+            state = gate_status(directory, pid)
+        elif record.get("OMADEV_INPUT_GATE") == "1":
+            state = gate_status(Path(record["OMADEV_INPUT_GATE_DIR"]), int(record["OMADEV_PID"]))
+
+
+def cmd_release(args: list[str]) -> int:
+    if args:
+        die("release takes no arguments")
+    forwarded = forward_input_command("release", args)
+    if forwarded is not None:
+        return forwarded
+    try:
+        with capture_lock():
+            release_gate_records()
+            subprocess.run(["hyprctl", "dispatch", 'hl.dsp.submap("reset")'], check=True, timeout=3)
+    except (Fail, OSError, subprocess.SubprocessError) as error:
+        message = f"Input release failed: {error}. Super+Shift+Alt+D is the emergency escape (key cleanup unconfirmed)."
+        with contextlib.suppress(OSError, subprocess.SubprocessError):
+            notify(message)
+        die(message)
+    return 0
+
+
 def cmd_focus(args: list[str]) -> int:
     # Capture routes the user's keyboard into a nest. Only user actions in the
     # widget set this flag automatically. An agent driving a nest must never
@@ -1315,6 +1486,20 @@ def cmd_focus(args: list[str]) -> int:
     if os.environ.get("OMADEV_ALLOW_CAPTURE") != "1":
         die("key capture is for the user at the keyboard (the bar panel or session widget), not for "
             "scripts or agents: drive the nest with `omadev run N ...` and `omadev hyprctl N dispatch ...`")
+    try:
+        forwarded = forward_input_command("focus", args)
+        if forwarded is not None:
+            return forwarded
+        with capture_lock():
+            return focus_locked(args)
+    except (Fail, OSError, subprocess.SubprocessError) as error:
+        message = f"Capture failed: {error}"
+        with contextlib.suppress(OSError, subprocess.SubprocessError):
+            notify(message)
+        die(message)
+
+
+def focus_locked(args: list[str]) -> int:
     if args and is_slot(args[0]):
         slot = int(args[0])
     else:
@@ -1327,6 +1512,14 @@ def cmd_focus(args: list[str]) -> int:
         notify(f"No nested Omarchy in slot {slot}")
         return 1
     env = read_env(slot)
+    gated = env.get("OMADEV_INPUT_GATE") == "1"
+    if gated:
+        bindings = CONFIG_DIR / "hypr/bindings.lua"
+        if not bindings.is_file() or not any(path.resolve() == SELF for _, path in installed_binding_blocks(bindings.read_text())):
+            die("gated capture needs the acknowledged release binding; run this version's omadev setup first")
+        if gate_status(Path(env["OMADEV_INPUT_GATE_DIR"]), int(env["OMADEV_PID"]))['state'] == 'unavailable':
+            die("input gate is unavailable; capture refused")
+    release_gate_records()
     ctl = ["hyprctl", "-i", env["OMADEV_HOST_SIG"]] if env.get("OMADEV_HOST_SIG") else ["hyprctl"]
     # Every nest window is titled "aquamarine - WAYLAND-1"; the compositor PID
     # tells them apart. Resolve it to the address selector Omarchy itself uses.
@@ -1341,7 +1534,17 @@ def cmd_focus(args: list[str]) -> int:
     if active.get("address") != address:
         notify(f"Could not focus nested Omarchy {slot} (host locked?)")
         return 1
-    subprocess.run([*ctl, "dispatch", 'hl.dsp.submap("nested")'], capture_output=True)
+    routed = subprocess.run([*ctl, "dispatch", 'hl.dsp.submap("nested")'], capture_output=True)
+    if routed.returncode:
+        return routed.returncode
+    if gated:
+        try:
+            state = gate_request(Path(env["OMADEV_INPUT_GATE_DIR"]), "capture")
+            print("omadev: " + ("waiting for held keys to be released" if state['state'] == 'pending' else "keys captured"))
+        except (OSError, RuntimeError, ValueError) as error:
+            release_gate_records()
+            subprocess.run([*ctl, "dispatch", 'hl.dsp.submap("reset")'], capture_output=True)
+            die(f"capture refused: {error}")
     return 0
 
 
@@ -1445,7 +1648,7 @@ COMMANDS = {
     "start": cmd_start, "ensure": cmd_ensure, "list": cmd_list, "focus": cmd_focus,
     "run": cmd_exec([]), "hyprctl": cmd_exec(["hyprctl"]), "shell": cmd_exec(["omarchy-shell"]),
     "screenshot": cmd_screenshot, "log": cmd_log, "diff": cmd_diff, "stop": cmd_stop, "clean": cmd_clean,
-    "setup": cmd_setup, "_publish": cmd_publish,
+    "setup": cmd_setup, "_publish": cmd_publish, "release": cmd_release, "input-status": cmd_input_status,
 }
 
 
