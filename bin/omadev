@@ -15,7 +15,6 @@ from __future__ import annotations
 import argparse
 import contextlib
 import fcntl
-import hashlib
 import json
 import math
 import os
@@ -1274,21 +1273,13 @@ def setup_widget() -> str:
     qml = dst / "Omadev.qml"
     qml.write_text(qml.read_text().replace('readonly property string hostLauncher: "omadev"',
                     'readonly property string hostLauncher: ' + json.dumps(str(SELF), ensure_ascii=False)))
-    # Qt may retain the old component across plugin rescans. A content-addressed
-    # entry point reloads this widget without restarting the desktop shell.
-    entry = "OmadevBuild" + hashlib.sha256(qml.read_bytes()).hexdigest()[:16] + ".qml"
-    shutil.copy2(qml, dst / entry)
-    manifest_path = dst / "manifest.json"
-    manifest = json.loads(manifest_path.read_text())
-    manifest["entryPoints"]["barWidget"] = entry
-    manifest_path.write_text(json.dumps(manifest, indent=2) + "\n")
     quiet = dict(capture_output=True, timeout=10)
     with contextlib.suppress(OSError, subprocess.SubprocessError):
         subprocess.run(["omarchy-shell", "shell", "rescanPlugins"], **quiet)
     for _ in range(10):
         with contextlib.suppress(OSError, subprocess.SubprocessError):
             if subprocess.run(["omarchy", "plugin", "enable", "dry.omadev"], **quiet).returncode == 0:
-                return f"widget copied to {dst} and enabled; plugin reload requested"
+                return f"widget copied to {dst} and enabled; restart the bar once: omarchy restart shell"
         time.sleep(0.5)
     return f"widget copied to {dst}, but the bar could not enable it (shell not running?): " \
            "omarchy restart shell && omarchy plugin enable dry.omadev"
