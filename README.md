@@ -104,7 +104,7 @@ omadev                                  # lowest free slot, installed /usr/share
 omadev start 2 --path ~/Projects/omarchy   # slot 2 runs a checkout
 omadev --scale 1.25                     # HiDPI nest; the size always follows the window
 omadev --no-shell                       # compositor only
-omadev start 2 --input-gate              # opt-in: block host keys until explicit capture; automation still works
+omadev start 2                          # host keys blocked until capture by default; automation still works
 omadev list                             # the nine slots
 omadev start --detach                   # return once the nest's shell answers (start otherwise blocks)
 omadev log 2 -f                         # follow nest 2's shell and app output (not the compositor's)
@@ -168,11 +168,11 @@ OMADEV_ALLOW_CAPTURE=1 omadev focus 2   # focus nest 2 and capture keys (user-on
 
 Nested-only Hyprland config goes in `~/.config/hypr/omadev.lua`; it is copied into each new nest and loaded after the normal config. Edit the nest's private copy for live changes, or start a fresh nest to pick up host edits.
 
-## Opt-in keyboard isolation
+## Keyboard isolation
 
-`--input-gate` blocks host keyboard events before Hyprland processes them, while preserving virtual test input. Capture waits for pre-held keys to be released. Focus loss or controller failure revokes capture; merely returning focus cannot recapture. The nested widget reports the actual gate state, including `RELEASE HELD KEYS` and `INPUT STATUS UNKNOWN`. Unknown status is not a guarantee that input is blocked.
+Every new session blocks host keyboard events before Hyprland processes them, while preserving virtual test input. Capture waits for pre-held keys to be released. Focus loss or controller failure revokes capture; merely returning focus cannot recapture. The nested widget reports the actual gate state, including `RELEASE HELD KEYS` and `INPUT STATUS UNKNOWN`. Unknown status is not a guarantee that input is blocked.
 
-Build with `./bin/build-input-gate`, or use the installer/package build. Human capture requires the updated `omadev setup` release binding. `omadev input-status N` and `list --json` expose readiness/state. Startup refuses to silently run unguarded if the native helper fails to initialize. This remains opt-in pending physical keyboard testing; see [input gate design, tests, and rollout](docs/input-gate.md).
+Build with `./bin/build-input-gate`, or use the installer/package build. Human capture requires the updated `omadev setup` release binding. `omadev input-status N` and `list --json` expose readiness/state. Startup refuses to silently run unguarded if the native helper fails to initialize. There is no legacy fallback for new sessions. Existing ungated sessions must be restarted. See [input gate design, tests, and rollout](docs/input-gate.md).
 
 ## Every nest has its own home and runtime dir
 
@@ -368,7 +368,7 @@ libexec/bash-env                   checkout-aware Bash bootstrap, used by BASH_E
 libexec/overlay/                   CLI dispatch, safe refresh/theme/restart, launcher shims and host-command guards
 libexec/refuse-host-command        shared refusal implementation for guard symlinks
 libexec/keeper/shell.qml           per-nest helper: idle inhibitor + follow-the-window resize
-libexec/input_gate.py              launcher-owned controller for opt-in keyboard isolation
+libexec/input_gate.py              launcher-owned controller for keyboard isolation
 libexec/input-gate/                native host-Wayland keyboard filter, built by bin/build-input-gate
 tests/                            disposable checkout/environment tests and panel behavior tests
 ```

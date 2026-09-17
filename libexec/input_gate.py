@@ -1,4 +1,4 @@
-"""Opt-in gate control. The launcher owns this controller, not omarchy-shell.
+"""Required keyboard gate control. The launcher owns this controller, not omarchy-shell.
 
 The native filter is authoritative: focus epochs prevent delayed authorization
 from surviving a leave/re-enter race, and a short lease closes input if this

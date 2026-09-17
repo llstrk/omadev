@@ -87,7 +87,7 @@ Start options:
   --place <mode>   workspace: the nest joins the host workspace named omadev without stealing focus (default)
                    tile: leave the window where the host's layout puts it   (env: OMADEV_PLACE)
   --no-shell       Compositor only
-  --input-gate     Opt in to host keyboard isolation until explicit capture (requires built native helper)
+  Host keyboard isolation is always enabled; the built native helper is required.
   --idle           Let the nested shell run its idle/screensaver/lock cycle (default: disabled)
   --reuse          Keep this slot's previous private home instead of cloning a fresh one
   --plugin <dir>   Link a plugin checkout (e.g. a git worktree) into the nest's plugins under its
@@ -566,8 +566,10 @@ def cmd_clean(args: list[str]) -> int:
 def parse_start(argv: list[str]) -> argparse.Namespace:
     p = argparse.ArgumentParser(prog="omadev start", add_help=False)
     p.add_argument("slot", nargs="?")
-    for flag in ("detach", "no-shell", "idle", "reuse", "help", "input-gate"):
+    for flag in ("detach", "no-shell", "idle", "reuse", "help"):
         p.add_argument("--" + flag, action="store_true")
+    # Keep old scripts working; all starts now require the gate, with no opt-out.
+    p.add_argument("--input-gate", action="store_true", default=True, help=argparse.SUPPRESS)
     p.add_argument("--sandbox", action="store_true", help=argparse.SUPPRESS)  # former option; every nest is one now
     p.add_argument("--reuse-sandbox", dest="reuse", action="store_true", help=argparse.SUPPRESS)
     p.add_argument("--owner", default="")
@@ -1098,7 +1100,7 @@ def start_detached(slot: int, argv: list[str], ns: argparse.Namespace) -> int:
     # ours: a digit that was an option value must not be mistaken for the slot.
     child_argv = [sys.executable, str(SELF), "start", str(slot), "--owner", ns.owner, "--path", ns.path,
                   "--scale", ns.scale, "--place", ns.place]
-    child_argv += [f"--{flag}" for flag in ("no-shell", "idle", "reuse", "input-gate") if getattr(ns, flag.replace("-", "_"))]
+    child_argv += [f"--{flag}" for flag in ("no-shell", "idle", "reuse") if getattr(ns, flag.replace("-", "_"))]
     for plugin in ns.plugin:
         child_argv += ["--plugin", plugin]
     if ns.extra:
@@ -1155,7 +1157,7 @@ def cmd_ensure(argv: list[str]) -> int:
         if env.get("OMARCHY_PATH") != os.path.realpath(ns.path):
             die(f"nest {slot} is running {env.get('OMARCHY_PATH')}, not {os.path.realpath(ns.path)}; stop it first")
         if ns.input_gate and env.get("OMADEV_INPUT_GATE") != "1":
-            die(f"nest {slot} was started without --input-gate; stop it first")
+            die(f"nest {slot} uses legacy keyboard routing; stop and restart it to enable the required input gate")
         if env.get("OMADEV_OWNER", "") != ns.owner:
             die(f"nest {slot} belongs to {env.get('OMADEV_OWNER') or 'the user'}, not {ns.owner or 'an unnamed caller'}; "
                 "pass its --owner or pick another slot")

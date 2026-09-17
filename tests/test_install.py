@@ -1,4 +1,4 @@
-"""Installer failure fallback, with fake tools and setup in a temporary home."""
+"""Required helper failures stop installation, with fake tools and a private home."""
 import os
 from pathlib import Path
 import shutil
@@ -9,7 +9,7 @@ import unittest
 ROOT = Path(__file__).resolve().parents[1]
 
 class InstallTests(unittest.TestCase):
-    def test_failed_optional_build_still_installs_legacy_launcher(self):
+    def test_failed_required_build_stops_installation(self):
         self.check_fallback(True)
 
     def test_missing_toolchain_discards_stale_helper(self):
@@ -35,8 +35,8 @@ class InstallTests(unittest.TestCase):
             result = subprocess.run(['bash', str(source/'install.sh')], capture_output=True, text=True,
                                     env={**os.environ, 'HOME':str(home), 'CC':'cc' if toolchain else '/missing/test-compiler',
                                          'PATH':str(tools)+':/usr/bin'}, timeout=10)
-            self.assertEqual(result.returncode, 0, result.stderr)
-            self.assertIn('optional input-gate build failed' if toolchain else 'optional --input-gate needs', result.stderr)
-            self.assertTrue((home/'setup-ran').exists())
+            self.assertNotEqual(result.returncode, 0)
+            self.assertIn('required input-gate build failed' if toolchain else 'installation requires', result.stderr)
+            self.assertFalse((home/'setup-ran').exists())
             self.assertFalse(stale.exists())
-            self.assertEqual((home/'.local/bin/omadev').resolve(), source/'bin/omadev')
+            self.assertFalse((home/'.local/bin/omadev').exists())

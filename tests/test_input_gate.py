@@ -128,9 +128,18 @@ class LauncherGateTests(unittest.TestCase):
             record['OMADEV_INPUT_GATE'] = '0'
             self.assertEqual(fn(2)['input_gate'], {'state':'legacy'})
 
-    def test_gate_is_opt_in(self):
-        self.assertFalse(self.module['parse_start']([]).input_gate)
-        self.assertTrue(self.module['parse_start'](['--input-gate']).input_gate)
+    def test_gate_is_required_by_default_and_old_flag_is_compatible(self):
+        for args in ([], ['--detach'], ['--no-shell'], ['--input-gate']):
+            self.assertTrue(self.module['parse_start'](args).input_gate)
+
+    def test_default_start_refuses_missing_native_helper(self):
+        fn = self.module['validate_start']
+        with tempfile.TemporaryDirectory() as tmp, \
+             patch.dict(fn.__globals__, ROOT=Path(tmp)), \
+             patch.dict(os.environ, {'WAYLAND_DISPLAY':'test'}, clear=True), \
+             patch('shutil.which', return_value='/usr/bin/test'):
+            with self.assertRaisesRegex(self.module['Fail'], 'input gate is not built'):
+                fn(self.module['parse_start']([]))
 
     def test_preload_is_not_given_to_dbus_or_watchdog(self):
         launch = self.module['launch_compositor']

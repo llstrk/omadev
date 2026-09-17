@@ -19,11 +19,13 @@ if command -v "${CC:-cc}" >/dev/null && command -v pkg-config >/dev/null && pkg-
   if ! "$src/bin/build-input-gate"; then
     # Do not accidentally enable an older helper against the updated launcher.
     rm -f "$src/libexec/input-gate/keyboard-gate.so"
-    echo "omadev: optional input-gate build failed; continuing legacy installation. Rebuild before using --input-gate." >&2
+    echo "omadev: required input-gate build failed; installation stopped." >&2
+    exit 1
   fi
 else
   rm -f "$src/libexec/input-gate/keyboard-gate.so"
-  echo "omadev: optional --input-gate needs a C compiler, pkg-config and Wayland 1.26+ headers; build later with $src/bin/build-input-gate" >&2
+  echo "omadev: installation requires a C compiler, pkg-config and Wayland 1.26+ headers." >&2
+  exit 1
 fi
 
 mkdir -p "$HOME/.local/bin"

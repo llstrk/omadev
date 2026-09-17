@@ -1,4 +1,4 @@
-/* Opt-in host-Wayland keyboard gate, preloaded into nested Hyprland only.
+/* Host-Wayland keyboard gate, preloaded into nested Hyprland only.
  * A lease file contains: generation monotonic_deadline_ns focus_epoch pid.
  * No lease, expired lease, focus leave, or a new generation clears forwarded
  * keys. Keys held before capture must be released before delivery can begin.

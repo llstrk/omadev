@@ -95,7 +95,8 @@ omadev list --json                              # all slots, owners, pids, paths
   the user's own: claim your own with `ensure N --owner <name>`.
 - Browsers: a nest has a fresh, empty Chromium-family profile, so the browser opens inside the nest
   (with no logins).
-- `--input-gate` opts into source-level host keyboard isolation. Build the helper with
+- All new sessions use host keyboard isolation automatically, including panel launches.
+  There is no opt-out or legacy fallback. Build the required helper with
   `bin/build-input-gate` first. `omadev input-status N` reports the real gate state;
   `uncaptured` is normal for agent-driven tests, and virtual input still works.
   Never invoke the gate's internal capture control socket against the real host.

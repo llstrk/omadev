@@ -1,6 +1,6 @@
-# Opt-in keyboard input gate
+# Keyboard input gate
 
-Start with `omadev start --input-gate` (or add `--input-gate` to `ensure`). Existing sessions and starts without the flag retain the legacy input behavior. This is an opt-in rollout, not a new default.
+The input gate is required for every new session, including plain `omadev`, `start`, `ensure`, and launches from the panel. No flag is needed and there is no opt-out. The old `--input-gate` flag remains accepted for script compatibility. Existing legacy sessions are not changed in place; stop and restart them. `ensure` refuses to reuse a legacy session.
 
 ## Build and enable
 
@@ -10,12 +10,12 @@ A source checkout needs a C compiler, `pkg-config`, and the Wayland 1.26+ client
 ./bin/build-input-gate
 ```
 
-`install.sh` builds the helper when these tools are available. Without them normal installation still works, but gated starts refuse until the helper is built. Missing tools or a failed optional compilation remove any stale generated helper and continue legacy installation with a warning, so an update cannot silently enable an older gate. The package recipe builds the library and declares architecture-specific packages and Wayland dependencies. As with any release, its version/tag and source checksum must be updated to a release containing these sources before publishing a package; the existing v0.2.0 archive cannot build this new feature.
+`install.sh` requires these tools and builds the helper before installing the launcher or updating host configuration. Missing tools or a failed compilation remove any stale generated helper and stop installation. Startup also refuses if the helper is missing or cannot initialize; it never falls back to legacy input. The package recipe builds the library and declares architecture-specific packages and Wayland dependencies. As with any release, its version/tag and source checksum must be updated to a release containing these sources before publishing a package; the existing v0.2.0 archive cannot build this new feature.
 
 For human capture, install this version's launcher and run its `omadev setup` to update the widget and release binding. Merely starting a gated nest for automated tests does not require changing the host binding. Setup writes the absolute launcher path into both the host widget and release binding, avoiding an older `omadev` earlier on the compositor's PATH, and includes an independent emergency escape. It migrates the complete shipped block from another installation path, including a deleted or moved checkout, without rewriting customized blocks. Gated capture requires the shipped binding block in the immediate host's configuration. Restart existing nests after upgrading: new nests record the immediate host's home, configuration path and session bus so widget commands cannot accidentally inspect the private clone or notify the wrong session.
 
 ```bash
-omadev start 2 --input-gate
+omadev start 2
 omadev input-status 2
 omadev list --json
 ```
@@ -52,7 +52,7 @@ The filter handles both direct `wl_proxy_destroy` and marshal-with-destroy clean
 
 ## Validation and rollout
 
-Validated locally with Hyprland 0.56.2-2, Aquamarine 0.15.0-2, Wayland 1.26.0-1, and Quickshell 0.3.1-1. Other stack versions and aarch64 builds still require validation; the feature stays opt-in.
+Validated locally with Hyprland 0.56.2-2, Aquamarine 0.15.0-2, Wayland 1.26.0-1, and Quickshell 0.3.1-1. Other stack versions and aarch64 builds still require validation.
 
 Automated integration runs only inside an owned disposable parent nest, using child compositors to model host-to-nest input. Run builds and tests in a visible terminal there:
 
@@ -64,9 +64,9 @@ cd /path/to/omadev
 ./tests/run-input-gate-tests
 ```
 
-Coverage includes initially blocked input, pre-held capture keys, actual Ctrl/Shift/Alt/Super combinations, virtual typing, acknowledged release, focus loss/return, two-nest switching, controller stalls, stale generation renewal, repeated capture/release, config reload, German XKB layout, and both keyboard-proxy destruction paths, application key-repeat cancellation, dead-controller release fallback, and the installed emergency callback inside a disposable child compositor. Unit tests cover controller validation, freshness/PID checks, opt-in defaults, CLI capture guards, release ordering, and binding migration. `tests/gated-session-smoke.py` additionally checks real launcher startup, virtual terminal typing, widget state, and a nest-local shell restart.
+Coverage includes initially blocked input, pre-held capture keys, actual Ctrl/Shift/Alt/Super combinations, virtual typing, acknowledged release, focus loss/return, two-nest switching, controller stalls, stale generation renewal, repeated capture/release, config reload, German XKB layout, and both keyboard-proxy destruction paths, application key-repeat cancellation, dead-controller release fallback, and the installed emergency callback inside a disposable child compositor. Unit tests cover controller validation, freshness/PID checks, mandatory defaults and missing-helper refusal, CLI capture guards, release ordering, and binding migration. `tests/gated-session-smoke.py` additionally checks real launcher startup, virtual terminal typing, widget state, and a nest-local shell restart.
 
-Before making the gate default, a human should check on the supported stack:
+When validating another supported stack or keyboard setup, a human should check:
 
 1. Look at and click an uncaptured session while using host shortcuts. No host text or modifiers should reach it.
 2. Capture using both the panel and keyboard selection, including while the selection key is held. Release the key and confirm normal typing starts.
@@ -74,4 +74,4 @@ Before making the gate default, a human should check on the supported stack:
 4. Repeat with the user's actual keyboard layout, repeat behavior, IME, and any custom capture submap/bindings. The initial controller supports the shipped `nested` submap only.
 5. Confirm the installed package/installer migration, then repeat after an actual controller/compositor failure.
 
-Do not infer these physical keyboard checks from the synthetic integration suite. The live host was not modified or captured during development.
+Do not infer these physical keyboard checks from the synthetic integration suite. Automated tests do not capture the human's host keyboard. Host deployment and physical keyboard testing are separate steps.
