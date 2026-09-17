@@ -1,7 +1,7 @@
 # Maintainer: Dennis Rye <dryerr@gmail.com>
 
 pkgname=omadev
-pkgver=0.2.0
+pkgver=0.3.0
 pkgrel=1
 pkgdesc='Run Omarchy sessions as windows inside the current one, for plugin development and agents (slots 1-9)'
 arch=('x86_64' 'aarch64')
@@ -20,7 +20,7 @@ depends=(
 makedepends=('gcc' 'pkgconf')
 optdepends=('wtype: type into a session from the command line')
 source=("$pkgname-$pkgver.tar.gz::$url/archive/refs/tags/v$pkgver.tar.gz")
-sha256sums=('34067759e5bb6da34cfe30bb2c83c2709c5a2e995680131960f27899524c3c5a')
+sha256sums=('3303f0baf004dd1d0f6e549318acbfeb6156327129fb3cba55de65532dd3a8e8')
 
 build() {
   cd "$pkgname-$pkgver"
@@ -36,5 +36,6 @@ package() {
   install -d "$pkgdir/usr/bin"
   ln -s ../lib/omadev/bin/omadev "$pkgdir/usr/bin/omadev"
   install -Dm644 README.md "$pkgdir/usr/share/doc/$pkgname/README.md"
+  cp -r docs "$pkgdir/usr/share/doc/$pkgname/"
   install -Dm644 LICENSE "$pkgdir/usr/share/licenses/$pkgname/LICENSE"
 }
