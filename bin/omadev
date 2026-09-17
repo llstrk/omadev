@@ -1269,7 +1269,7 @@ def widget_dir() -> Path:
 
 
 BACKEND_PROTOCOL = 1
-BACKEND_VERSION = "0.3.0-dev"
+BACKEND_VERSION = "0.3.0"
 
 
 def backend_capabilities(host_context: bool = True) -> dict:

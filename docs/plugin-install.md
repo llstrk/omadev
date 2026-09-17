@@ -38,7 +38,7 @@ would let a routine plugin update change Python code while leaving an older nati
 library behind. Neither git-managed plugin updates nor removal own installed backend
 snapshots. Old releases are kept until the user removes them after stopping sessions
 that use them. Package users can install a compatible package and run `omadev setup`
-instead. The currently pinned v0.2.0 package archive predates this protocol.
+instead. Backend protocol 1 requires v0.3.0 or later; v0.2.0 predates this protocol.
 
 ## Backend protocol
 
