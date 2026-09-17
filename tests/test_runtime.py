@@ -19,7 +19,8 @@ class RuntimeTests(unittest.TestCase):
         self.run = self.base / 'omadev-2'
         self.run.mkdir()
         (self.run / 'marker').touch()
-        self.env = patch.dict(remove_runtime.__globals__, RUNTIME_DIR=self.base)
+        self.env = patch.dict(remove_runtime.__globals__, RUNTIME_DIR=self.base,
+                              RUN_DIR=self.base / 'omadev')
         self.env.start()
         self.addCleanup(self.env.stop)
 

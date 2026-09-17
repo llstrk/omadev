@@ -107,6 +107,7 @@ omadev --no-shell                       # compositor only
 omadev start 2                          # host keys blocked until capture by default; automation still works
 omadev list                             # the nine slots
 omadev start --detach                   # return once the nest's shell answers (start otherwise blocks)
+omadev start --force --place tile       # opt in to starting a child inside a nest
 omadev log 2 -f                         # follow nest 2's shell and app output (not the compositor's)
 ```
 
