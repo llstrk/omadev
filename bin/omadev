@@ -1045,7 +1045,8 @@ def run_foreground(slot: int, env: dict[str, str], extra: list[str]) -> int:
     if env.get("OMADEV_INPUT_GATE") == "1":
         gate = GateController(Path(env["OMADEV_INPUT_GATE_DIR"]),
                               lambda: read_env(slot).get("OMADEV_PID"),
-                              lambda: gate_host_snapshot(env)).start()
+                              lambda: gate_host_snapshot(env),
+                              lambda: restore_idle_host_routing(env)).start()
     cancelled = False
 
     def interrupt(*_):
@@ -1097,6 +1098,9 @@ def run_foreground(slot: int, env: dict[str, str], extra: list[str]) -> int:
         host_refresh()
         if HELD_LOCK is not None:
             os.close(HELD_LOCK)  # releases the slot; stop waits for this
+        if gate is not None:
+            with contextlib.suppress(OSError, subprocess.SubprocessError, ValueError):
+                restore_idle_host_routing(env)
 
 
 def start_detached(slot: int, argv: list[str], ns: argparse.Namespace) -> int:
@@ -1413,11 +1417,55 @@ def gate_host_snapshot(env: dict[str, str]) -> tuple[str, str]:
 
 
 @contextlib.contextmanager
-def capture_lock():
+def capture_lock(blocking: bool = True):
     RUN_DIR.mkdir(parents=True, exist_ok=True)
     with (RUN_DIR / "capture.lock").open("a") as lock:
-        fcntl.flock(lock, fcntl.LOCK_EX)
-        yield
+        try:
+            fcntl.flock(lock, fcntl.LOCK_EX | (0 if blocking else fcntl.LOCK_NB))
+        except BlockingIOError:
+            yield False
+            return
+        yield True
+
+
+def restore_idle_host_routing(env: dict[str, str]) -> None:
+    """Repair a stale nested submap only after all native keys are released.
+
+    Never block the controller on a capture command: that command holds the
+    same lock while waiting for a response from the controller. Inspect native
+    status directly, not the controller sockets. A new capture cannot race the
+    acknowledgement checks and reset while we hold this lock.
+    """
+    with capture_lock(blocking=False) as acquired:
+        if not acquired:
+            return
+        ctl = ["hyprctl", "-i", env["OMADEV_HOST_SIG"]]
+        submap = subprocess.run([*ctl, "submap"], capture_output=True, text=True,
+                                timeout=.2, check=True)
+        if submap.stdout.strip() != "nested":
+            return
+        for slot in SLOTS:
+            record = read_env(slot)
+            if not record:
+                # Starting slots have not published their native status yet.
+                if slot_locked(slot):
+                    return
+                continue
+            if record.get("OMADEV_HOST_SIG") != env["OMADEV_HOST_SIG"]:
+                return  # Cannot establish that this record belongs elsewhere.
+            health = slot_health(slot, record)
+            if health == "dead":
+                continue
+            if health != "alive":
+                return
+            if record.get("OMADEV_INPUT_GATE") != "1":
+                return  # Legacy sessions cannot acknowledge native cleanup.
+            state = gate_status(Path(record["OMADEV_INPUT_GATE_DIR"]), int(record["OMADEV_PID"]))
+            if (state.get("state") != "uncaptured" or state.get("generation") != 0
+                    or state.get("forwarded") != 0):
+                return
+        subprocess.run([*ctl, "dispatch", 'hl.dsp.submap("reset")'],
+                       capture_output=True, timeout=.2, check=True)
 
 
 def forward_input_command(command: str, args: list[str]) -> int | None:

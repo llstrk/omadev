@@ -56,8 +56,10 @@ class Controller:
     CLI has focused this nest and selected the nested submap. The native gate
     additionally binds the request to the observed keyboard focus epoch.
     """
-    def __init__(self, directory: Path, session, host):
+    def __init__(self, directory: Path, session, host, restore_host=None):
         self.directory, self.session, self.host = directory, session, host
+        self.restore_host = restore_host
+        self.next_restore = 0
         self.generation = 0
         self.epoch = 0
         self.pid = 0
@@ -128,6 +130,7 @@ class Controller:
 
     def heartbeat(self):
         if not self.generation:
+            self.restore_idle_host()
             return
         matches = self.host_matches()
         state = self.status()
@@ -136,8 +139,19 @@ class Controller:
                 or state['state'] not in ('captured', 'pending')
                 or state.get('focusEpoch') != self.epoch or state.get('pid') != self.pid):
             self.revoke()
+            self.restore_idle_host()
         else:
             self.renew()
+
+    def restore_idle_host(self):
+        # Revocation closes native input, but does not reset the host submap.
+        # Retry while idle: acknowledgement may arrive on a later native tick.
+        # The callback checks every gate under the capture lock, without asking
+        # this controller's socket (which would deadlock its own serve thread).
+        now = time.monotonic()
+        if self.restore_host is not None and now >= self.next_restore:
+            self.next_restore = now + .5
+            self.restore_host()
 
     def start(self):
         self.directory.mkdir(mode=0o700, parents=True, exist_ok=True)

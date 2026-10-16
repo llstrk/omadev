@@ -46,6 +46,17 @@ The native watchdog runs on the compositor's main event loop. Closing the gate r
 
 The release command serializes with capture/switching, closes all running guarded sessions, waits for native acknowledgement, then resets the host submap. It also works with legacy sessions. The release fallback removes a dead controller's lease and still requires acknowledgement.
 
+An idle controller also repairs a stale `nested` host submap after automatic
+revocation, such as when focus leaves the nest. It retries at most twice per
+second and resets routing only when every live native gate on that host reports
+`uncaptured`, generation zero and zero forwarded keys. Unknown, pending,
+captured, legacy or starting sessions prevent automatic reset. Recovery takes
+the capture lock without waiting, so switching capture to another nest cannot
+deadlock the controller or have its new routing reset. Other host submaps are
+left alone. Orderly nest shutdown checks again after removing its session record
+and releasing its slot. If no controller remains alive, automatic polling is
+unavailable; the acknowledged release command remains the fallback.
+
 Startup waits for a fresh native protocol/status handshake from the correct compositor PID and at least one intercepted keyboard. A missing or incompatible hook causes startup to fail rather than silently running unguarded. This checks hook installation, not every possible future Wayland/Aquamarine behavioral change.
 
 The filter handles both direct `wl_proxy_destroy` and marshal-with-destroy cleanup. The latter matters for generated Wayland clients. Controller/native status and lease files live in the slot's private runtime state, not in host configuration. They contain no key text or keycode history. This is input routing isolation, not a security sandbox against same-user processes or arbitrary plugins.

@@ -7,7 +7,7 @@ import sys
 import tempfile
 import time
 import unittest
-from unittest.mock import patch
+from unittest.mock import Mock, patch
 
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / 'libexec'))
@@ -88,6 +88,33 @@ class GateTests(unittest.TestCase):
         self.gate.deadline = time.monotonic_ns() - 1
         self.gate.heartbeat()
         self.assertEqual(self.gate.generation, 0)
+
+    def test_focus_loss_requests_host_recovery_after_revoking_lease(self):
+        self.fake_native()
+        self.gate.capture()
+        self.host = ('456', 'nested')
+        observations = []
+        self.gate.restore_host = lambda: observations.append(
+            (self.gate.generation, (self.directory / 'lease').exists()))
+        self.gate.heartbeat()
+        self.assertEqual(observations, [(0, False)])
+
+    def test_idle_recovery_retries_without_busy_polling(self):
+        self.gate.restore_host = Mock()
+        with patch('input_gate.time.monotonic', return_value=10):
+            self.gate.heartbeat()
+            self.gate.heartbeat()
+        self.gate.restore_host.assert_called_once_with()
+        with patch('input_gate.time.monotonic', return_value=10.5):
+            self.gate.heartbeat()
+        self.assertEqual(self.gate.restore_host.call_count, 2)
+
+    def test_active_capture_does_not_request_host_recovery(self):
+        self.fake_native()
+        self.gate.capture()
+        self.gate.restore_host = Mock()
+        self.gate.heartbeat()
+        self.gate.restore_host.assert_not_called()
 
     def test_release_waits_for_native_ack(self):
         self.fake_native()
@@ -247,3 +274,106 @@ class LauncherGateTests(unittest.TestCase):
         self.assertEqual(len(notifications), 1)
         self.assertIn('Super+Shift+Alt+D', notifications[0])
         self.assertIn('cleanup unconfirmed', notifications[0])
+
+
+class HostRoutingRecoveryTests(unittest.TestCase):
+    """All compositor calls are mocked; never select a real host submap."""
+    def setUp(self):
+        self.module = runpy.run_path(str(ROOT / 'bin/omadev'))
+        self.fn = self.module['restore_idle_host_routing']
+        self.tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.tmp.cleanup)
+        self.record = {'OMADEV_HOST_SIG': 'test-host', 'OMADEV_PID': '123',
+                       'OMADEV_INPUT_GATE': '1', 'OMADEV_INPUT_GATE_DIR': '/test/gate'}
+        self.records = {1: self.record}
+        self.health = 'alive'
+        self.state = {'state': 'uncaptured', 'generation': 0, 'forwarded': 0}
+        self.submap = 'nested'
+        self.locked = False
+        globals_patch = patch.dict(self.fn.__globals__, RUN_DIR=Path(self.tmp.name),
+                                  SLOTS=(1, 2), read_env=lambda n: self.records.get(n, {}),
+                                  slot_locked=lambda _: self.locked,
+                                  slot_health=lambda *_: self.health,
+                                  gate_status=lambda *_: self.state)
+        globals_patch.start()
+        self.addCleanup(globals_patch.stop)
+        self.run = Mock(side_effect=lambda *a, **kw: type('Result', (), {
+            'stdout': self.submap + '\n', 'returncode': 0})())
+        run_patch = patch('subprocess.run', self.run)
+        run_patch.start()
+        self.addCleanup(run_patch.stop)
+
+    def resets(self):
+        return [call.args[0] for call in self.run.call_args_list if 'dispatch' in call.args[0]]
+
+    def test_stale_nested_mode_resets_after_all_gates_acknowledge(self):
+        self.fn(self.record)
+        self.assertEqual(self.resets(), [
+            ['hyprctl', '-i', 'test-host', 'dispatch', 'hl.dsp.submap("reset")']])
+
+    def test_pending_captured_revoked_and_unknown_states_never_reset(self):
+        for state in ('pending', 'captured', 'revoked', 'unavailable'):
+            with self.subTest(state=state):
+                self.state['state'] = state
+                self.fn(self.record)
+        self.assertEqual(self.resets(), [])
+
+    def test_forwarded_keys_or_old_generation_prevent_reset(self):
+        for state in ({'state': 'uncaptured', 'generation': 0, 'forwarded': 1},
+                      {'state': 'uncaptured', 'generation': 7, 'forwarded': 0},
+                      {'state': 'uncaptured'}):
+            self.state = state
+            self.fn(self.record)
+        self.assertEqual(self.resets(), [])
+
+    def test_delayed_acknowledgement_allows_later_recovery(self):
+        self.state['forwarded'] = 1
+        self.fn(self.record)
+        self.assertEqual(self.resets(), [])
+        self.state['forwarded'] = 0
+        self.fn(self.record)
+        self.assertEqual(len(self.resets()), 1)
+
+    def test_other_session_capture_is_preserved(self):
+        self.records[2] = {**self.record, 'OMADEV_PID': '456'}
+        with patch.dict(self.fn.__globals__, gate_status=lambda _d, pid:
+                        self.state if pid == 123 else {'state': 'captured', 'generation': 7, 'forwarded': 0}):
+            self.fn(self.record)
+        self.assertEqual(self.resets(), [])
+
+    def test_other_submaps_are_untouched(self):
+        for self.submap in ('default', 'resize', ''):
+            self.fn(self.record)
+        self.assertEqual(self.resets(), [])
+
+    def test_capture_lock_is_nonblocking_and_prevents_host_queries(self):
+        with self.module['capture_lock']():
+            self.fn(self.record)
+        self.run.assert_not_called()
+        self.fn(self.record)
+        self.assertEqual(len(self.resets()), 1)
+
+    def test_legacy_unreachable_starting_and_other_host_records_fail_closed(self):
+        self.record['OMADEV_INPUT_GATE'] = '0'
+        self.fn(self.record)
+        self.record['OMADEV_INPUT_GATE'] = '1'
+        for self.health in ('unreachable', 'free'):
+            self.fn(self.record)
+        self.health = 'alive'
+        self.locked = True
+        self.fn(self.record)
+        self.locked = False
+        self.records[2] = {**self.record, 'OMADEV_HOST_SIG': 'other-host'}
+        self.fn(self.record)
+        self.assertEqual(self.resets(), [])
+
+    def test_no_remaining_sessions_can_restore_stale_mode(self):
+        self.records.clear()
+        self.fn(self.record)
+        self.assertEqual(len(self.resets()), 1)
+
+    def test_dead_session_does_not_prevent_recovery(self):
+        self.health = 'dead'
+        self.state = {'state': 'unavailable'}
+        self.fn(self.record)
+        self.assertEqual(len(self.resets()), 1)
