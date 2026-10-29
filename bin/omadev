@@ -1428,44 +1428,49 @@ def capture_lock(blocking: bool = True):
         yield True
 
 
-def restore_idle_host_routing(env: dict[str, str]) -> None:
+def restore_idle_host_routing(env: dict[str, str]) -> bool:
     """Repair a stale nested submap only after all native keys are released.
 
     Never block the controller on a capture command: that command holds the
     same lock while waiting for a response from the controller. Inspect native
     status directly, not the controller sockets. A new capture cannot race the
     acknowledgement checks and reset while we hold this lock.
+
+    Returns True once routing no longer needs repair (not in the nested
+    submap, or reset), False if recovery was deferred and may be retried.
     """
     with capture_lock(blocking=False) as acquired:
         if not acquired:
-            return
+            return False
         ctl = ["hyprctl", "-i", env["OMADEV_HOST_SIG"]]
         submap = subprocess.run([*ctl, "submap"], capture_output=True, text=True,
                                 timeout=.2, check=True)
         if submap.stdout.strip() != "nested":
-            return
+            return True
         for slot in SLOTS:
             record = read_env(slot)
             if not record:
                 # Starting slots have not published their native status yet.
                 if slot_locked(slot):
-                    return
+                    return False
                 continue
-            if record.get("OMADEV_HOST_SIG") != env["OMADEV_HOST_SIG"]:
-                return  # Cannot establish that this record belongs elsewhere.
+            # A dead record cannot hold input, whichever host it came from.
             health = slot_health(slot, record)
             if health == "dead":
                 continue
+            if record.get("OMADEV_HOST_SIG") != env["OMADEV_HOST_SIG"]:
+                return False  # Cannot establish that this record belongs elsewhere.
             if health != "alive":
-                return
+                return False
             if record.get("OMADEV_INPUT_GATE") != "1":
-                return  # Legacy sessions cannot acknowledge native cleanup.
+                return False  # Legacy sessions cannot acknowledge native cleanup.
             state = gate_status(Path(record["OMADEV_INPUT_GATE_DIR"]), int(record["OMADEV_PID"]))
             if (state.get("state") != "uncaptured" or state.get("generation") != 0
                     or state.get("forwarded") != 0):
-                return
+                return False
         subprocess.run([*ctl, "dispatch", 'hl.dsp.submap("reset")'],
                        capture_output=True, timeout=.2, check=True)
+        return True
 
 
 def forward_input_command(command: str, args: list[str]) -> int | None:
