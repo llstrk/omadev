@@ -11,6 +11,7 @@ from unittest.mock import Mock, patch
 
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / 'libexec'))
+import input_gate
 from input_gate import Controller, native_status, request
 
 
@@ -99,15 +100,45 @@ class GateTests(unittest.TestCase):
         self.gate.heartbeat()
         self.assertEqual(observations, [(0, False)])
 
-    def test_idle_recovery_retries_without_busy_polling(self):
+    def test_idle_without_lost_capture_never_polls_host(self):
         self.gate.restore_host = Mock()
+        for now in (10, 20, 30):
+            with patch('input_gate.time.monotonic', return_value=now):
+                self.gate.heartbeat()
+        self.gate.restore_host.assert_not_called()
+
+    def test_recovery_retries_briefly_after_losing_capture(self):
+        self.gate.restore_host = Mock(return_value=False)
         with patch('input_gate.time.monotonic', return_value=10):
+            self.gate.lose()
             self.gate.heartbeat()
             self.gate.heartbeat()
         self.gate.restore_host.assert_called_once_with()
         with patch('input_gate.time.monotonic', return_value=10.5):
             self.gate.heartbeat()
         self.assertEqual(self.gate.restore_host.call_count, 2)
+        with patch('input_gate.time.monotonic', return_value=10 + input_gate.RESTORE_WINDOW):
+            self.gate.heartbeat()
+        self.assertEqual(self.gate.restore_host.call_count, 2)
+
+    def test_successful_recovery_stops_polling(self):
+        self.gate.restore_host = Mock(return_value=True)
+        with patch('input_gate.time.monotonic', return_value=10):
+            self.gate.lose()
+            self.gate.heartbeat()
+        with patch('input_gate.time.monotonic', return_value=11):
+            self.gate.heartbeat()
+        self.gate.restore_host.assert_called_once_with()
+
+    def test_failed_heartbeat_while_captured_arms_recovery(self):
+        self.fake_native()
+        self.gate.capture()
+        self.gate.restore_host = Mock(return_value=True)
+        self.gate.host = lambda: (_ for _ in ()).throw(OSError('hyprctl timed out'))
+        self.gate.tick()
+        self.assertEqual(self.gate.generation, 0)
+        self.assertFalse((self.directory / 'lease').exists())
+        self.assertGreater(self.gate.restore_until, 0)
 
     def test_active_capture_does_not_request_host_recovery(self):
         self.fake_native()
@@ -376,4 +407,10 @@ class HostRoutingRecoveryTests(unittest.TestCase):
         self.health = 'dead'
         self.state = {'state': 'unavailable'}
         self.fn(self.record)
+        self.assertEqual(len(self.resets()), 1)
+
+    def test_dead_record_from_old_host_does_not_block_recovery(self):
+        self.records[2] = {**self.record, 'OMADEV_HOST_SIG': 'old-host', 'OMADEV_PID': '456'}
+        with patch.dict(self.fn.__globals__, slot_health=lambda slot, _r: 'dead' if slot == 2 else 'alive'):
+            self.fn(self.record)
         self.assertEqual(len(self.resets()), 1)

@@ -16,6 +16,8 @@ from pathlib import Path
 
 LEASE_NS = 750_000_000
 FRESH_NS = 400_000_000
+RESTORE_WINDOW = 5.0  # seconds to keep retrying host recovery after losing a capture
+RESTORE_INTERVAL = .5
 
 
 def native_status(directory: Path, pid: int | None = None) -> dict:
@@ -60,6 +62,7 @@ class Controller:
         self.directory, self.session, self.host = directory, session, host
         self.restore_host = restore_host
         self.next_restore = 0
+        self.restore_until = 0
         self.generation = 0
         self.epoch = 0
         self.pid = 0
@@ -138,20 +141,41 @@ class Controller:
                 or state.get('generation') != self.generation
                 or state['state'] not in ('captured', 'pending')
                 or state.get('focusEpoch') != self.epoch or state.get('pid') != self.pid):
-            self.revoke()
+            self.lose()
             self.restore_idle_host()
         else:
             self.renew()
 
+    def lose(self):
+        """Revoke a capture that ended without an explicit release, and arm host
+        recovery: the nested submap would otherwise keep swallowing host keys."""
+        self.revoke()
+        if self.restore_host is not None:
+            self.restore_until = time.monotonic() + RESTORE_WINDOW
+            self.next_restore = 0
+
+    def tick(self):
+        try:
+            self.heartbeat()
+        except Exception:
+            # A failed check while captured is a lost capture, too.
+            if self.generation:
+                self.lose()
+            else:
+                self.revoke()
+
     def restore_idle_host(self):
         # Revocation closes native input, but does not reset the host submap.
-        # Retry while idle: acknowledgement may arrive on a later native tick.
+        # Retry briefly: acknowledgement may arrive on a later native tick.
+        # Only armed after losing a capture, so idle nests never poll the host.
         # The callback checks every gate under the capture lock, without asking
         # this controller's socket (which would deadlock its own serve thread).
         now = time.monotonic()
-        if self.restore_host is not None and now >= self.next_restore:
-            self.next_restore = now + .5
-            self.restore_host()
+        if self.restore_host is None or now >= self.restore_until or now < self.next_restore:
+            return
+        self.next_restore = now + RESTORE_INTERVAL
+        if self.restore_host():
+            self.restore_until = 0
 
     def start(self):
         self.directory.mkdir(mode=0o700, parents=True, exist_ok=True)
@@ -201,10 +225,7 @@ class Controller:
                             response = {'ok': False, 'error': str(error)}
                         with contextlib.suppress(OSError):
                             client.sendall((json.dumps(response) + '\n').encode())
-                try:
-                    self.heartbeat()
-                except Exception:
-                    self.revoke()
+                self.tick()
         finally:
             self.revoke()
             self.listener.close()
