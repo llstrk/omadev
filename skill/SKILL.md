@@ -65,6 +65,8 @@ omadev run 3 omarchy restart shell              # reload only this nest's shell
 omadev hyprctl 3 clients -j
 omadev hyprctl 3 dispatch 'hl.dsp.exec_cmd("ghostty")'   # compositor actions
 omadev run 3 wtype "some text"                  # into the focused app; SUPER+... binds do not fire from wtype
+omadev click 3 X Y [--mods shift] [--button right] [--double]   # pointer click at screenshot pixels
+omadev move 3 X Y                               # hover
 omadev screenshot 3 [file.png]                  # prints the path
 omadev log 3 [-f] [--all]                       # shell + app output; --all keeps benign noise
 
@@ -138,6 +140,10 @@ omadev list --json                              # all slots, owners, pids, paths
   fires the compositor's own bindings. To do what a SUPER binding would do,
   dispatch its action: `hyprctl N dispatch 'hl.dsp.focus({ workspace = "2" })'`.
   To open a widget's panel use its IPC: `shell N shell toggle <plugin-id> '{}'`.
+- `omadev click N X Y` is the pointer: X,Y are pixels of `omadev screenshot` (so read
+  them straight off a screenshot, also at `--scale 2`), `--mods shift,ctrl,alt` are held
+  for exactly the click. Don't time `wtype -M shift` against a separate click. Super+click
+  goes to the compositor (Omarchy's move-window binding), not the app.
 - A nest keeps rendering while the host is not showing its window (another
   workspace in front): the host rule marks nest windows render-unfocused, so
   screenshots and GUI tests work with the user on any workspace. Hidden nests

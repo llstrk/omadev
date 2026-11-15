@@ -306,8 +306,19 @@ omadev ensure 3 --owner teammate-1 --plugin ~/wt/fix   # idempotent claim, waits
 omadev list --json                                            # slots, owners, pids, paths, environments
 omadev screenshot 3 [file]                                    # grim inside the nest
 omadev run 3 wtype "text"                                     # into the focused app, no host focus needed
+omadev click 3 800 600 --mods shift                          # Shift+click at screenshot pixels (no host pointer)
+omadev move 3 800 600                                         # hover there
 omadev hyprctl 3 dispatch 'hl.dsp.exec_cmd("ghostty")'        # compositor-level actions
 ```
+
+`click` and `move` drive a virtual pointer inside the nest; the host's
+pointer never moves. X and Y are pixels of `omadev screenshot` (at `--scale 2`
+that is twice the layout coordinates; `--logical` takes layout coordinates).
+`--mods` holds the modifiers on a virtual keyboard for exactly the length of the
+click, so a Shift+click is one command. Like a real mouse, a modifier the
+compositor binds to the pointer (Omarchy: Super+drag moves a window) is taken by
+the compositor, not the app. `tests/click-integration.py N` checks it against a
+running nest.
 
 ## What is shared and what is not
 

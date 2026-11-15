@@ -68,6 +68,10 @@ Usage:
   omadev hyprctl [N] <args...>     hyprctl against nest N
   omadev shell [N] <args...>       omarchy-shell IPC against nest N's shell
   omadev screenshot [N] [file]     grim inside nest N; prints the file
+  omadev click [N] X Y [--button left|right|middle] [--mods shift,ctrl,alt,super] [--double] [--logical]
+                                   Click at X,Y in nest N, holding the modifiers for the click; X,Y are
+                                   pixels of `screenshot` (--logical: layout coordinates)
+  omadev move [N] X Y [--logical]  Move nest N's pointer there (hover)
   omadev log [N] [-f] [--all]      Journal of nest N's shell and apps; --all keeps known-benign noise
   omadev diff N                    What nest N changed in its Omarchy config and state
   omadev links N [path...] [--json] Paths in nest N's home that are symlinks to the real home; with paths,
@@ -1893,6 +1897,70 @@ def cmd_screenshot(args: list[str]) -> int:
     return 0
 
 
+def parse_pointer(args: list[str], command: str) -> tuple[int, argparse.Namespace]:
+    p = argparse.ArgumentParser(prog=f"omadev {command}", add_help=False)
+    p.add_argument("coords", nargs="+")
+    p.add_argument("--logical", action="store_true")
+    if command == "click":
+        p.add_argument("--button", default="left", choices=["left", "right", "middle"])
+        p.add_argument("--mods", default="")
+        p.add_argument("--double", action="store_true")
+    try:
+        ns = p.parse_args(args)
+    except SystemExit:
+        raise Fail(f"usage: omadev {command} [N] X Y" + (" [--button B] [--mods shift,ctrl] [--double]" if command == "click" else "")
+                   + " [--logical]") from None
+    coords = ns.coords
+    # "click 5 300 400": the slot first; "click 300 400": the only (or current) nest.
+    if len(coords) == 3 and is_slot(coords[0]):
+        slot, coords = int(coords[0]), coords[1:]
+    elif len(coords) == 2:
+        slot = pick_slot(None)
+    else:
+        die(f"{command} needs X and Y (and optionally the slot first)")
+    try:
+        ns.x, ns.y = (int(round(float(c))) for c in coords)
+    except ValueError:
+        die(f"{command}: X and Y must be numbers, got {' '.join(coords)}")
+    return slot, ns
+
+
+def output_extent(env: dict[str, str], logical: bool) -> tuple[int, int]:
+    """The nest's output size in screenshot pixels, or in layout coordinates."""
+    try:
+        monitors = json.loads(subprocess.run(["hyprctl", "monitors", "-j"], env=env, capture_output=True,
+                                             text=True, timeout=10).stdout or "[]")
+    except (subprocess.SubprocessError, ValueError, OSError) as exc:
+        die(f"cannot read the nest's output size: {exc}")
+    if not monitors:
+        die("the nest has no output")
+    m = monitors[0]
+    if logical:
+        scale = float(m.get("scale") or 1)
+        return int(round(m["width"] / scale)), int(round(m["height"] / scale))
+    return int(m["width"]), int(m["height"])
+
+
+def cmd_pointer(command: str):
+    def run(args: list[str]) -> int:
+        from wlinput import InputError, pointer_input
+        slot, ns = parse_pointer(args, command)
+        env = nest_env(slot)
+        width, height = output_extent(env, ns.logical)
+        try:
+            if command == "click":
+                pointer_input(ns.x, ns.y, width, height, button=ns.button,
+                              mods=[m for m in ns.mods.split(",") if m.strip()], clicks=2 if ns.double else 1,
+                              display=env["WAYLAND_DISPLAY"], runtime=env["XDG_RUNTIME_DIR"])
+            else:
+                pointer_input(ns.x, ns.y, width, height,
+                              display=env["WAYLAND_DISPLAY"], runtime=env["XDG_RUNTIME_DIR"])
+        except InputError as exc:
+            die(str(exc))
+        return 0
+    return run
+
+
 def cmd_exec(prefix: list[str]):
     def run(args: list[str]) -> int:
         slot, rest = split_slot(args)
@@ -1904,7 +1972,7 @@ def cmd_exec(prefix: list[str]):
 COMMANDS = {
     "start": cmd_start, "ensure": cmd_ensure, "list": cmd_list, "focus": cmd_focus,
     "run": cmd_exec([]), "hyprctl": cmd_exec(["hyprctl"]), "shell": cmd_exec(["omarchy-shell"]),
-    "screenshot": cmd_screenshot, "log": cmd_log, "diff": cmd_diff, "links": cmd_links, "stop": cmd_stop, "clean": cmd_clean,
+    "screenshot": cmd_screenshot, "click": cmd_pointer("click"), "move": cmd_pointer("move"), "log": cmd_log, "diff": cmd_diff, "links": cmd_links, "stop": cmd_stop, "clean": cmd_clean,
     "setup": cmd_setup, "capabilities": cmd_capabilities, "_publish": cmd_publish, "release": cmd_release, "input-status": cmd_input_status,
 }
 
