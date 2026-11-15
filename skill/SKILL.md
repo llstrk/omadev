@@ -149,6 +149,8 @@ omadev list --json                              # all slots, owners, pids, paths
   Pass `--size WxH` when the video's size matters (demos, posts): the nest is held at
   exactly that size until `stop`, and other nests starting or stopping cannot resize it.
   The user sees a red border on a recording nest's window; set the scale before `start`.
+  Quality defaults to `high` (full resolution, crisp text, plays everywhere); `--quality max`
+  is 4:4:4 (sharpest, but often unplayable in browsers/phones), `draft` is small and soft.
 - Wait on state, not time: `omadev wait N layer <namespace>` after opening an overlay,
   `wait N window <class>` after launching an app, `--gone` after closing. A terminal's
   shell usually renames its window, so match a terminal by class (`foot --app-id=x`),

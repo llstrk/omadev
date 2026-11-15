@@ -36,10 +36,6 @@ class SizeTests(unittest.TestCase):
         with self.assertRaisesRegex(omadev.Fail, 'does not divide evenly at the nest.s scale 1.5'):
             omadev.parse_size('1366x768', 1.5)
 
-    def test_a_pinned_recording_keeps_full_resolution(self):
-        self.assertEqual(recorder.frame_scale(2560, 1, target_width=2560), 1)
-        self.assertEqual(recorder.frame_scale(2560, 2, target_width=2560), 2)
-        self.assertEqual(recorder.frame_scale(2560, 1), 0.75)  # unpinned: about full HD
 
 
 class MarkTests(TempHome):
@@ -125,6 +121,24 @@ class RecorderExitTests(unittest.TestCase):
             recorder.capture(base, 1.0, 1, 10)
             self.assertTrue(done.exists())
             self.assertEqual((Path(tmp) / 'grim-env').read_text().strip(), 'wayland-nest')
+
+    def test_repeated_frames_are_dropped(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            base, bin_dir = Path(tmp) / 'record', Path(tmp) / 'bin'
+            recorder.paths(base)['frames'].mkdir(parents=True)
+            bin_dir.mkdir()
+            grim = bin_dir / 'grim'  # the same picture every time; writes its file as the last argument
+            grim.write_text(f'#!/bin/sh\nfor a; do f=$a; done\necho same > "$f"\necho x >> {tmp}/calls\n')
+            grim.chmod(0o755)
+            recorder.paths(base)['env'].write_text(json.dumps({'PATH': f'{bin_dir}:/usr/bin:/bin'}))
+            recorder.paths(base)['meta'].write_text(json.dumps({'started': 1}))
+            recorder.capture(base, 1.0, 1, 10, 'png')
+            calls = len((Path(tmp) / 'calls').read_text().split())
+            kept = recorder.frame_times(recorder.paths(base)['frames'])
+            self.assertGreaterEqual(calls, 6)
+            self.assertLessEqual(len(kept), recorder.WORKERS)  # one, plus at most a frame finishing out of order
+            self.assertTrue(all(f.suffix == '.png' for _, f in kept))
+            self.assertIn('ended', recorder.read_meta(base))
 
 
 if __name__ == '__main__':

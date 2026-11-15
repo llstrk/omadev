@@ -80,8 +80,10 @@ Usage:
                                    Click at X,Y in nest N, holding the modifiers for the click; X,Y are
                                    pixels of `screenshot` (--logical: layout coordinates)
   omadev move [N] X Y [--logical]  Move nest N's pointer there (hover)
-  omadev record [N] start [file.mp4] [--size WxH] [--max S] [--fps F]
+  omadev record [N] start [file.mp4] [--size WxH] [--quality draft|high|max] [--max S] [--fps F]
                                    Record nest N in the background (grim frames; 10 fps, 600 s by default).
+                                   Full resolution and crisp text by default (high); max: 4:4:4, the
+                                   sharpest, but many browsers and phones cannot play it; draft: small
                                    Until it stops, the nest's host window has a red border and the grid
                                    leaves it alone. --size makes the nest, and the video, WxH pixels
   omadev record [N] caption "text"  Caption from now until the next caption ("" clears it)
@@ -2285,12 +2287,16 @@ def cmd_record(args: list[str]) -> int:
     base = HOME_BASE / str(slot) / "record"
     try:
         if action == "start":
-            size_arg = None
-            if "--size" in rest:
-                i = rest.index("--size")
-                if i + 1 >= len(rest):
-                    die("--size needs WIDTHxHEIGHT")
-                size_arg, rest = rest[i + 1], rest[:i] + rest[i + 2:]
+            words = {"--size": None, "--quality": recorder.DEFAULT_QUALITY}
+            for flag in words:
+                if flag in rest:
+                    i = rest.index(flag)
+                    if i + 1 >= len(rest):
+                        die(f"{flag} needs a value")
+                    words[flag], rest = rest[i + 1], rest[:i] + rest[i + 2:]
+            size_arg, quality = words["--size"], words["--quality"]
+            if quality not in recorder.QUALITIES:
+                die(f"--quality is one of {', '.join(recorder.QUALITIES)} (default {recorder.DEFAULT_QUALITY}), got {quality!r}")
             numbers = {"--max": recorder.MAX_SECONDS, "--fps": recorder.FPS}
             for flag in numbers:
                 if flag in rest:
@@ -2302,7 +2308,7 @@ def cmd_record(args: list[str]) -> int:
                     rest = rest[:i] + rest[i + 2:]
             max_seconds, fps = int(numbers["--max"]), numbers["--fps"]
             if len(rest) > 1 or not 0.5 <= fps <= 30:
-                die("usage: omadev record [N] start [file.mp4] [--size WxH] [--max S] [--fps 0.5-30]")
+                die("usage: omadev record [N] start [file.mp4] [--size WxH] [--quality draft|high|max] [--max S] [--fps 0.5-30]")
             out = Path(rest[0]).resolve() if rest else RUN_DIR / str(slot) / f"recording-{time.strftime('%H%M%S')}.mp4"
             env = nest_env(slot)
             if recorder.recording(base):
@@ -2314,16 +2320,14 @@ def cmd_record(args: list[str]) -> int:
             try:
                 if size:
                     pin_size(slot, size)
-                    width = size[0]
                 mark_recording(slot, True)
-                recorder.start(base, out, env, width, max_seconds, fps, round(scale, 3),
-                               target_width=width if size else recorder.TARGET_WIDTH,
+                recorder.start(base, out, env, max_seconds, fps, scale, quality,
                                on_exit=[str(SELF), "_record-ended", str(slot)],
                                extra={"size": f"{size[0]}x{size[1]}" if size else None})
             except BaseException:
                 mark_recording(slot, False)
                 raise
-            print(f"recording nest {slot}{f' at {size[0]}x{size[1]}' if size else ''} to {out}; its host window "
+            print(f"recording nest {slot}{f' at {size[0]}x{size[1]}' if size else ''} ({quality} quality) to {out}; its host window "
                   f"stays put (red border) until: omadev record {slot} stop; caption with: omadev record {slot} caption \"...\"")
         elif action == "caption":
             if len(rest) != 1:
@@ -2342,13 +2346,14 @@ def cmd_record(args: list[str]) -> int:
         elif action == "status":
             meta = recorder.read_meta(base)
             if recorder.recording(base):
-                frames = len(list((base / "frames").glob("*.jpg")))
+                frames = len(recorder.frame_times(base / "frames"))
                 print(f"nest {slot} is recording to {meta['file']}: "
-                      f"{(time.time_ns() - meta['started']) / 1e9:.0f} s, {frames} frames")
+                      f"{(time.time_ns() - meta['started']) / 1e9:.0f} s, {frames} frames kept "
+                      f"(repeats dropped), {meta.get('quality', 'draft')} quality")
             else:
                 print(f"nest {slot} is not recording" + (" (a stopped recording waits for: record stop)" if meta else ""))
         else:
-            die("usage: omadev record [N] start [file.mp4] [--size WxH] | caption \"text\" | stop [--sheet] | status")
+            die("usage: omadev record [N] start [file.mp4] [--size WxH] [--quality draft|high|max] | caption \"text\" | stop [--sheet] | status")
     except recorder.RecordError as exc:
         die(str(exc))
     return 0
