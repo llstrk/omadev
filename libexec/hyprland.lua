@@ -46,8 +46,21 @@ require_optional.module("hypr.omadev")
 -- The nested output. Hyprland names the host window WAYLAND-1. Without a
 -- the output follows the host window: "preferred" is whatever the window is
 -- now, and the Wayland backend reports a new mode on resize.
-local scale = tonumber(os.getenv("OMADEV_SCALE") or "1") or 1
-hl.monitor({ output = "WAYLAND-1", mode = "preferred", position = "0x0", scale = scale })
+-- The scale lives in OMADEV_SCALE_FILE, which `omadev scale N <s>` rewrites;
+-- the start value (OMADEV_SCALE) is the fallback. A global, because the keeper
+-- re-applies this rule after every host window resize through `hyprctl eval`
+-- and must use the current scale, not the one the nest started with.
+function omadev_scale()
+  local scale = tonumber(os.getenv("OMADEV_SCALE") or "1") or 1
+  local path = os.getenv("OMADEV_SCALE_FILE")
+  local f = path and io.open(path, "r")
+  if f then
+    scale = tonumber((f:read("l") or ""):match("^%s*(.-)%s*$")) or scale
+    f:close()
+  end
+  return scale
+end
+hl.monitor({ output = "WAYLAND-1", mode = "preferred", position = "0x0", scale = omadev_scale() })
 
 -- Keep the checkout and safety overrides first, even if the user's Lua
 -- config or the checkout's envs.lua reordered PATH. Avoid duplicate entries.

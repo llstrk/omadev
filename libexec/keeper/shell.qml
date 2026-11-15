@@ -21,7 +21,7 @@ ShellRoot {
   readonly property var screen: Quickshell.screens.length > 0 ? Quickshell.screens[0] : null
   readonly property string size: screen ? screen.width + "x" + screen.height : ""
   readonly property bool followWindow: true
-  readonly property string scale: Quickshell.env("OMADEV_SCALE") || "1"
+  readonly property string scale: Quickshell.env("OMADEV_SCALE") || "1"  // the start scale; see rearrange
 
   onSizeChanged: if (followWindow && size !== "") rearm.restart()
 
@@ -67,7 +67,10 @@ ShellRoot {
   Process {
     id: rearrange
     command: ["hyprctl", "eval",
-      'hl.monitor({ output = "WAYLAND-1", mode = "preferred", position = "0x0", scale = ' + root.scale + ' })']
+      // omadev_scale() (the nest's hyprland.lua) reads the scale file, so a live
+      // `omadev scale` survives resizes; the start scale is the fallback.
+      'hl.monitor({ output = "WAYLAND-1", mode = "preferred", position = "0x0", scale = '
+        + '(omadev_scale and omadev_scale() or ' + root.scale + ') })']
     onExited: root.rearranged += 1
   }
 

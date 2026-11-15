@@ -178,5 +178,7 @@ omadev list --json                              # all slots, owners, pids, paths
   workspace that was active at start instead.
 - Closing a session's window on the host ends the session (same as `stop N`).
 - The nested output always follows the host window's size (so screenshots are
-  the size of the window on the host; there is no `--size`). Scale is 1 (`--scale`).
+  the size of the window on the host; there is no `--size`). Scale is 1 unless started with
+  `--scale`; change it live with `omadev scale N 2` (or `ensure N --scale 2`), no restart.
+  A scale that does not divide the output evenly is refused and the old one kept.
 - Nest windows all have the same title; the launcher and widget find them by PID.
