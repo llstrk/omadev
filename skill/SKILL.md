@@ -92,6 +92,19 @@ omadev list --json                              # all slots, owners, pids, paths
 - A `--plugin` link is a symlink, and the shell's `inotifywait -r` watcher does not follow
   symlinked directories: edits to a linked plugin do NOT hot-reload. After editing, run
   `omadev run N omarchy restart shell` (nest-safe) to load them.
+- A plugin the shell reloads from the same path keeps its old QML: the shell's
+  component cache is not cleared on reload (omacom/omarchy#6981), and a file
+  added to an already-loaded folder fails with "File name case mismatch". To see
+  new QML after `omarchy plugin update` or an edit, either load it from a new
+  path (a plugin can version its QML folder) or restart the nest's shell with
+  `omadev run N omarchy restart shell`. A bar widget or overlay looking unchanged
+  after an update is usually this, not your code.
+- Starting a nest (`start`, or `ensure` on a stopped slot) without `--reuse` rebuilds
+  its home from the real one: everything you set up in it is gone, and any path you
+  had made private by hand (an app's config, `~/.local/bin`, `mimeapps.list`) is a
+  symlink to the real home again, so the app under test writes the user's files.
+  Pass `--reuse` to keep a home across stop/start, and check what is shared before
+  writing through it.
 - `unreachable` in `list` means a record exists but this environment cannot reach the nest's
   compositor socket under $XDG_RUNTIME_DIR/hypr (an agent sandbox without it). Nothing is deleted;
   run omadev from an environment that has the runtime directory. Sessions without an owner are
