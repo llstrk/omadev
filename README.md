@@ -320,6 +320,23 @@ compositor binds to the pointer (Omarchy: Super+drag moves a window) is taken by
 the compositor, not the app. `tests/click-integration.py N` checks it against a
 running nest.
 
+`record` makes a captioned video of a nest, for test reports and demos:
+
+```bash
+omadev record 3 start ~/report.mp4          # background recorder, about 10 fps, up to 600 s (--fps, --max)
+omadev record 3 caption "1. The picker opens"
+omadev click 3 800 600 --mods shift
+omadev record 3 caption "2. Shift+click saves the rule"
+omadev record 3 stop --sheet                # encodes; --sheet also writes report.sheet.jpg, a contact sheet
+```
+
+Frames are grim screenshots at the nest's full resolution (scaled to about
+1920 wide), kept on disk in `~/.local/state/omadev/N/record` until the encode.
+Each frame lasts until the next, so the video keeps real time; each caption is
+burned in from its call until the next caption (`caption ""` clears it). The
+contact sheet shows 30 frames on one image, a quick way to check a take
+without watching it. Needs ffmpeg.
+
 ## What is shared and what is not
 
 | | Nest |
