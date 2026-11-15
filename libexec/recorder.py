@@ -6,6 +6,11 @@ by the time each was taken. `caption` appends a timestamped line to
 captions.jsonl. `stop` ends the recorder and encodes: every frame lasts until
 the next one, so the video keeps real time, and each caption is burned in from
 its timestamp until the next caption (an empty caption clears it).
+
+The recorder process runs with the host's environment and gives grim the
+nest's (env.json). When it ends, for any reason, it runs meta.json's
+`on_exit` command: omadev uses that to take the recording mark off the nest's
+host window and put the window back in the grid.
 """
 
 from __future__ import annotations
@@ -33,7 +38,8 @@ class RecordError(Exception):
 
 def paths(base: Path) -> dict[str, Path]:
     return {"dir": base, "frames": base / "frames", "captions": base / "captions.jsonl",
-            "meta": base / "meta.json", "log": base / "recorder.log"}
+            "meta": base / "meta.json", "log": base / "recorder.log", "env": base / "env.json",
+            "pinned": base / "pinned"}
 
 
 def read_meta(base: Path) -> dict:
@@ -54,14 +60,18 @@ def recording(base: Path) -> bool:
     return b"recorder.py" in cmdline and b"capture" in cmdline
 
 
-def frame_scale(output_width: int, output_scale: float = 1.0) -> float:
-    """grim's -s for frames about TARGET_WIDTH wide. grim scales the layout
-    size, so a scale-2 output needs -s 2 for its full pixel width."""
-    return round(output_scale * min(1.0, TARGET_WIDTH / max(1, output_width)), 3)
+def frame_scale(output_width: int, output_scale: float = 1.0, target_width: int = TARGET_WIDTH) -> float:
+    """grim's -s for frames about target_width wide (never larger than the
+    output). grim scales the layout size, so a scale-2 output needs -s 2 for
+    its full pixel width."""
+    return round(output_scale * min(1.0, target_width / max(1, output_width)), 3)
 
 
 def start(base: Path, out: Path, env: dict[str, str], output_width: int, max_seconds: int = MAX_SECONDS,
-          fps: float = FPS, output_scale: float = 1.0) -> None:
+          fps: float = FPS, output_scale: float = 1.0, target_width: int = TARGET_WIDTH,
+          on_exit: list[str] | None = None, extra: dict | None = None) -> None:
+    """Start the detached recorder. `env` is the nest's environment (for grim);
+    the recorder itself inherits this process's (the host's)."""
     if recording(base):
         raise RecordError(f"already recording to {read_meta(base).get('file')}; stop it first")
     if not shutil.which("grim") or not shutil.which("ffmpeg"):
@@ -70,11 +80,14 @@ def start(base: Path, out: Path, env: dict[str, str], output_width: int, max_sec
     shutil.rmtree(p["frames"], ignore_errors=True)
     p["frames"].mkdir(parents=True)
     p["captions"].write_text("")
-    scale = frame_scale(output_width, output_scale)
-    meta = {"file": str(out), "started": time.time_ns(), "scale": scale, "max_seconds": max_seconds}
+    scale = frame_scale(output_width, output_scale, target_width)
+    meta = {"file": str(out), "started": time.time_ns(), "scale": scale, "max_seconds": max_seconds,
+            "on_exit": on_exit or [], **(extra or {})}
+    p["env"].write_text(json.dumps(env))
+    p["meta"].write_text(json.dumps(meta, indent=2) + "\n")  # on_exit must be there before the recorder can end
     with open(p["log"], "w") as log:
         proc = subprocess.Popen([sys.executable, str(Path(__file__).resolve()), "capture", str(base), str(scale),
-                                 str(max_seconds), str(fps)], env=env, stdin=subprocess.DEVNULL, stdout=log, stderr=log,
+                                 str(max_seconds), str(fps)], stdin=subprocess.DEVNULL, stdout=log, stderr=log,
                                 start_new_session=True)
     meta["pid"] = proc.pid
     p["meta"].write_text(json.dumps(meta, indent=2) + "\n")
@@ -213,6 +226,10 @@ def capture(base: Path, scale: float, max_seconds: int, fps: float = FPS) -> Non
     together about `fps`, when grim keeps up."""
     period = WORKERS / max(0.5, fps)
     frames = paths(base)["frames"]
+    try:
+        nest_env = json.loads(paths(base)["env"].read_text())
+    except (OSError, ValueError):
+        nest_env = dict(os.environ)
     stop = threading.Event()
     signal.signal(signal.SIGTERM, lambda *_: stop.set())
     failures = [0]
@@ -223,7 +240,7 @@ def capture(base: Path, scale: float, max_seconds: int, fps: float = FPS) -> Non
             name = frames / f"{time.time_ns()}.jpg"
             part = name.with_suffix(".part")  # a frame cut off by stop must not reach the encoder
             proc = subprocess.run(["grim", "-t", "jpeg", "-q", "88", "-s", str(scale), str(part)],
-                                  capture_output=True)
+                                  env=nest_env, capture_output=True)
             if proc.returncode == 0:
                 part.rename(name)
             if proc.returncode != 0:
@@ -244,6 +261,12 @@ def capture(base: Path, scale: float, max_seconds: int, fps: float = FPS) -> Non
     stop.set()
     for t in threads:
         t.join(timeout=5)
+    on_exit = read_meta(base).get("on_exit") or []
+    if on_exit:
+        try:
+            subprocess.run(on_exit, stdin=subprocess.DEVNULL, capture_output=True, timeout=30)
+        except (OSError, subprocess.SubprocessError) as exc:
+            print(f"on_exit failed: {exc}", file=sys.stderr)
 
 
 if __name__ == "__main__" and len(sys.argv) == 6 and sys.argv[1] == "capture":

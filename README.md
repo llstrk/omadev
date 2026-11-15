@@ -337,6 +337,7 @@ full-screen overlay with `--region`.
 
 ```bash
 omadev record 3 start ~/report.mp4          # background recorder, about 10 fps, up to 600 s (--fps, --max)
+omadev record 3 start ~/demo.mp4 --size 1920x1080   # or a fixed size: the nest, and the video, are exactly 1920x1080
 omadev record 3 caption "1. The picker opens"
 omadev click 3 800 600 --mods shift
 omadev record 3 caption "2. Shift+click saves the rule"
@@ -349,6 +350,19 @@ Each frame lasts until the next, so the video keeps real time; each caption is
 burned in from its call until the next caption (`caption ""` clears it). The
 contact sheet shows 30 frames on one image, a quick way to check a take
 without watching it. Needs ffmpeg.
+
+While a nest records, its window on the host has a red border (a window rule
+on the `omadev-recording` tag), the bar widget's icon turns urgent and the
+session's row reads `● rec 1:23`, and `list --json` has a `recording` field.
+The grid leaves that window where and as big as it is, so other nests starting
+and stopping cannot change the video's size; they may overlap it on the host
+for a while, which does not reach the video. `--size WxH` sets the nest's
+output to exactly that many pixels for the recording (the window may be larger
+than the monitor) and records at full resolution instead of about 1920 wide;
+it must divide evenly at the nest's scale, so `scale 2` with `--size 2560x1440`
+records a 1280x720 layout at 2x. However the recording ends (`stop`, `--max`,
+the nest going away), the recorder takes the border off and puts the window
+back in the grid. `omadev scale` refuses while a nest records.
 
 ## What is shared and what is not
 
