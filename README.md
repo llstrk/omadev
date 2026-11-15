@@ -308,6 +308,9 @@ omadev screenshot 3 [file]                                    # grim inside the 
 omadev run 3 wtype "text"                                     # into the focused app, no host focus needed
 omadev click 3 800 600 --mods shift                          # Shift+click at screenshot pixels (no host pointer)
 omadev move 3 800 600                                         # hover there
+omadev wait 3 layer omaprofile                                # until that layer surface is mapped (--gone, --timeout)
+omadev wait 3 window chromium                                 # until a window's class or title matches
+omadev screenshot 3 out.png --window chromium --pad 20        # crop to a window (or --layer NS, --region X,Y,W,H)
 omadev hyprctl 3 dispatch 'hl.dsp.exec_cmd("ghostty")'        # compositor-level actions
 ```
 
@@ -319,6 +322,15 @@ click, so a Shift+click is one command. Like a real mouse, a modifier the
 compositor binds to the pointer (Omarchy: Super+drag moves a window) is taken by
 the compositor, not the app. `tests/click-integration.py N` checks it against a
 running nest.
+
+`wait` replaces sleep-and-hope polling: it returns as soon as a layer surface
+(by namespace), a window (class or title contains the text) or the shell is
+there, or gone with `--gone`, and exits 1 after `--timeout` (30 s). Screenshot
+crops take layout boxes from Hyprland; `--region` and `--pad` are in screenshot
+pixels, like `click`. Many Omarchy layers (the bar, full-screen overlays such as
+a picker with a scrim) cover the whole output, so `--layer` crops tightly only
+for smaller surfaces like the dock or notifications; crop a card inside a
+full-screen overlay with `--region`.
 
 `record` makes a captioned video of a nest, for test reports and demos:
 

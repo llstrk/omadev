@@ -67,7 +67,14 @@ Usage:
   omadev run [N] <command...>      Run a command with nest N's environment (and its private HOME)
   omadev hyprctl [N] <args...>     hyprctl against nest N
   omadev shell [N] <args...>       omarchy-shell IPC against nest N's shell
-  omadev screenshot [N] [file]     grim inside nest N; prints the file
+  omadev screenshot [N] [file] [--layer NS | --window MATCH | --region X,Y,W,H] [--pad P]
+                                   grim inside nest N; prints the file. --layer/--window crop to that
+                                   layer surface or window, --region to screenshot pixels; --pad adds
+                                   P pixels around the crop
+  omadev wait [N] layer NS | window MATCH | shell [--gone] [--timeout S]
+                                   Wait until a layer surface (by namespace) or a window (class or title
+                                   contains MATCH) is mapped in nest N, or the shell answers; --gone
+                                   waits for it to disappear. Exit 1 on timeout (default 30 s)
   omadev click [N] X Y [--button left|right|middle] [--mods shift,ctrl,alt,super] [--double] [--logical]
                                    Click at X,Y in nest N, holding the modifiers for the click; X,Y are
                                    pixels of `screenshot` (--logical: layout coordinates)
@@ -1892,11 +1899,119 @@ def cmd_log(args: list[str]) -> int:
     return proc.wait()
 
 
-def cmd_screenshot(args: list[str]) -> int:
-    slot, rest = split_slot(args)
-    file = rest[0] if rest else str(RUN_DIR / str(slot) / f"screenshot-{time.strftime('%H%M%S')}.png")
+def nest_json(env: dict[str, str], *args: str):
     try:
-        subprocess.run(["grim", file], env=nest_env(slot), timeout=15, check=True)
+        out = subprocess.run(["hyprctl", *args, "-j"], env=env, capture_output=True, text=True, timeout=10).stdout
+        return json.loads(out or "null")
+    except (subprocess.SubprocessError, ValueError, OSError):
+        return None
+
+
+def layer_boxes(env: dict[str, str], namespace: str) -> list[tuple[int, int, int, int]]:
+    """Layout boxes of the mapped layer surfaces with that namespace."""
+    boxes = []
+    for monitor in (nest_json(env, "layers") or {}).values():
+        for level in (monitor.get("levels") or {}).values():
+            for layer in level:
+                if layer.get("namespace") == namespace and layer.get("w", 0) > 0 and layer.get("h", 0) > 0:
+                    boxes.append((layer["x"], layer["y"], layer["w"], layer["h"]))
+    return boxes
+
+
+def window_boxes(env: dict[str, str], match: str) -> list[tuple[int, int, int, int]]:
+    """Layout boxes of mapped windows whose class or title contains `match` (any case)."""
+    needle = match.lower()
+    boxes = []
+    for client in nest_json(env, "clients") or []:
+        if client.get("mapped", True) and not client.get("hidden") and (
+                needle in str(client.get("class", "")).lower() or needle in str(client.get("title", "")).lower()):
+            (x, y), (w, h) = client["at"], client["size"]
+            boxes.append((x, y, w, h))
+    return boxes
+
+
+def cmd_wait(args: list[str]) -> int:
+    slot, rest = split_slot(args)
+    gone = "--gone" in rest
+    rest = [a for a in rest if a != "--gone"]
+    timeout = 30.0
+    if "--timeout" in rest:
+        i = rest.index("--timeout")
+        try:
+            timeout = float(rest[i + 1])
+        except (IndexError, ValueError):
+            die("--timeout needs a number of seconds")
+        rest = rest[:i] + rest[i + 2:]
+    if rest[:1] == ["shell"] and len(rest) == 1:
+        present = lambda: shell_ping(slot)  # noqa: E731
+        what = "the shell"
+    elif len(rest) == 2 and rest[0] in ("layer", "window"):
+        env = nest_env(slot)
+        find = layer_boxes if rest[0] == "layer" else window_boxes
+        present = lambda: bool(find(env, rest[1]))  # noqa: E731
+        what = f"{rest[0]} {rest[1]}"
+    else:
+        die("usage: omadev wait [N] layer NAMESPACE | window MATCH | shell [--gone] [--timeout S]")
+    deadline = time.monotonic() + timeout
+    while present() == gone:
+        if time.monotonic() > deadline:
+            print(f"omadev: {what} {'still there' if gone else 'not there'} after {timeout:g} s", file=sys.stderr)
+            return 1
+        time.sleep(0.1)
+    return 0
+
+
+def crop_box(box: tuple[float, float, float, float], pad: float, extent: tuple[int, int]) -> str:
+    """grim -g geometry for a layout box grown by pad and clamped to the output."""
+    x, y, w, h = box
+    left, top = max(0, x - pad), max(0, y - pad)
+    right, bottom = min(extent[0], x + w + pad), min(extent[1], y + h + pad)
+    if right - left < 1 or bottom - top < 1:
+        die("the crop is outside the nest's output")
+    return f"{round(left)},{round(top)} {round(right - left)}x{round(bottom - top)}"
+
+
+def parse_screenshot(args: list[str]) -> tuple[int, argparse.Namespace]:
+    p = argparse.ArgumentParser(prog="omadev screenshot", add_help=False)
+    p.add_argument("rest", nargs="*")
+    group = p.add_mutually_exclusive_group()
+    group.add_argument("--layer")
+    group.add_argument("--window")
+    group.add_argument("--region")
+    p.add_argument("--pad", type=float, default=0)
+    try:
+        ns = p.parse_args(args)
+    except SystemExit:
+        raise Fail("usage: omadev screenshot [N] [file] [--layer NS | --window MATCH | --region X,Y,W,H] [--pad P]") from None
+    slot, rest = split_slot(ns.rest)
+    if len(rest) > 1:
+        die("screenshot takes one file name")
+    ns.file = rest[0] if rest else ""
+    return slot, ns
+
+
+def cmd_screenshot(args: list[str]) -> int:
+    slot, ns = parse_screenshot(args)
+    file = ns.file or str(RUN_DIR / str(slot) / f"screenshot-{time.strftime('%H%M%S')}.png")
+    env = nest_env(slot)
+    geometry: list[str] = []
+    if ns.layer or ns.window or ns.region:
+        logical = output_extent(env, True)
+        scale = output_extent(env, False)[0] / max(1, logical[0])  # screenshot pixels per layout unit
+        if ns.region:
+            try:
+                box = tuple(float(v) / scale for v in ns.region.split(","))
+                assert len(box) == 4 and box[2] > 0 and box[3] > 0
+            except (ValueError, AssertionError):
+                die("--region takes X,Y,W,H in screenshot pixels")
+        else:
+            boxes = layer_boxes(env, ns.layer) if ns.layer else window_boxes(env, ns.window)
+            if not boxes:
+                die(f"no {'layer ' + ns.layer if ns.layer else 'window matching ' + ns.window} is mapped in nest {slot}")
+            box = boxes[0]
+        geometry = ["-g", crop_box(box, ns.pad / scale, logical)]
+    try:
+        subprocess.run(["grim", *geometry, file], env=env, timeout=15, check=True)
     except (subprocess.TimeoutExpired, subprocess.CalledProcessError, FileNotFoundError):
         die("grim failed (the host must be presenting the nest's window)")
     print(file)
@@ -2032,7 +2147,7 @@ def cmd_exec(prefix: list[str]):
 COMMANDS = {
     "start": cmd_start, "ensure": cmd_ensure, "list": cmd_list, "focus": cmd_focus,
     "run": cmd_exec([]), "hyprctl": cmd_exec(["hyprctl"]), "shell": cmd_exec(["omarchy-shell"]),
-    "screenshot": cmd_screenshot, "click": cmd_pointer("click"), "move": cmd_pointer("move"), "record": cmd_record, "log": cmd_log, "diff": cmd_diff, "links": cmd_links, "stop": cmd_stop, "clean": cmd_clean,
+    "screenshot": cmd_screenshot, "click": cmd_pointer("click"), "move": cmd_pointer("move"), "record": cmd_record, "wait": cmd_wait, "log": cmd_log, "diff": cmd_diff, "links": cmd_links, "stop": cmd_stop, "clean": cmd_clean,
     "setup": cmd_setup, "capabilities": cmd_capabilities, "_publish": cmd_publish, "release": cmd_release, "input-status": cmd_input_status,
 }
 

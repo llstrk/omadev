@@ -68,7 +68,8 @@ omadev run 3 wtype "some text"                  # into the focused app; SUPER+..
 omadev click 3 X Y [--mods shift] [--button right] [--double]   # pointer click at screenshot pixels
 omadev move 3 X Y                               # hover
 omadev record 3 start out.mp4 / caption "1. ..." / stop --sheet   # captioned video + contact sheet
-omadev screenshot 3 [file.png]                  # prints the path
+omadev screenshot 3 [file.png] [--window M | --layer NS | --region X,Y,W,H] [--pad P]   # prints the path
+omadev wait 3 layer NS | window M | shell [--gone] [--timeout S]   # instead of sleep loops
 omadev log 3 [-f] [--all]                       # shell + app output; --all keeps benign noise
 
 # Inspect and finish
@@ -145,6 +146,11 @@ omadev list --json                              # all slots, owners, pids, paths
   `caption` before each step, `stop --sheet`. Check the take on the contact sheet
   (`file.sheet.jpg`) before sending it; one-time setup done before `start` stays out
   of the video. Clear stale notifications first (`omadev shell N notifications dismissAll`).
+- Wait on state, not time: `omadev wait N layer <namespace>` after opening an overlay,
+  `wait N window <class>` after launching an app, `--gone` after closing. A terminal's
+  shell usually renames its window, so match a terminal by class (`foot --app-id=x`),
+  not by `--title`. Full-screen layers (the bar, scrimmed overlays) crop to the whole
+  output; use `--region` for a card inside one.
 - `omadev click N X Y` is the pointer: X,Y are pixels of `omadev screenshot` (so read
   them straight off a screenshot, also at `--scale 2`), `--mods shift,ctrl,alt` are held
   for exactly the click. Don't time `wtype -M shift` against a separate click. Super+click
