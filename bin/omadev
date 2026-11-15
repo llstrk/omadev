@@ -70,6 +70,8 @@ Usage:
   omadev screenshot [N] [file]     grim inside nest N; prints the file
   omadev log [N] [-f] [--all]      Journal of nest N's shell and apps; --all keeps known-benign noise
   omadev diff N                    What nest N changed in its Omarchy config and state
+  omadev links N [path...] [--json] Paths in nest N's home that are symlinks to the real home; with paths,
+                                   whether each is private or shared (exit 1 if any is shared)
   omadev stop [N|all] [--kill]     Ask the nest to exit and wait until it is gone (15 s; --kill then SIGTERM)
   omadev clean [N|all]             Remove a stopped nest's private home, launcher log and screenshots
   omadev setup                     Check backend readiness, configure host bindings, register backend and link skills
@@ -92,11 +94,16 @@ Start options:
   Host keyboard isolation is always enabled; the built native helper is required.
   --idle           Let the nested shell run its idle/screensaver/lock cycle (default: disabled)
   --reuse          Keep this slot's previous private home instead of cloning a fresh one
+  --private <path> Make a path under the home (e.g. .config/myapp, .local/bin) private to the nest: a
+                   copy of the real one, or an empty directory if there is none; repeatable. The slot
+                   remembers it, also when the home is rebuilt, until `clean N`. `ensure` applies it
+                   to a running nest too.
   --plugin <dir>   Link a plugin checkout (e.g. a git worktree) into the nest's plugins under its
                    manifest id; repeatable
 
 Every nest gets a private home: reflink clones of ~/.config/{omarchy,hypr} and ~/.local/state/omarchy
-plus empty browser profiles, and symlinks to everything else. shell.json, plugins, toggles and
+plus empty browser profiles, and symlinks to everything else (`links N` lists them; `--private`
+copies more). shell.json, plugins, toggles and
 theme state of a nest never touch the host; `diff N` shows what it changed. It also gets a private
 XDG_RUNTIME_DIR that shares the host's sockets (Wayland, PipeWire, agents) but not its per-session
 state, so a recorder or single-instance app inside the nest does not see the host's.
@@ -273,7 +280,8 @@ def slot_json(slot: int) -> dict:
     state = slot_state(slot, env)
     sb = nest_home(slot)
     if state in ("free", "starting"):
-        return {"slot": slot, "state": state, "owner": "", "home": str(sb) if sb else None, "plugins": linked_plugins(sb)}
+        return {"slot": slot, "state": state, "owner": "", "home": str(sb) if sb else None, "plugins": linked_plugins(sb),
+                "private": private_paths(slot)}
     try:
         started = int(env_file(slot).stat().st_mtime)
     except OSError:
@@ -286,6 +294,7 @@ def slot_json(slot: int) -> dict:
         "omarchy_path": env.get("OMARCHY_PATH"),
         "home": env.get("OMADEV_HOME") or None,
         "plugins": linked_plugins(sb),
+        "private": private_paths(slot),
         "input_gate": gate_status(Path(env["OMADEV_INPUT_GATE_DIR"]), int(env["OMADEV_PID"]))
             if env.get("OMADEV_INPUT_GATE") == "1" else {"state": "legacy"},
         "started_at": started,
@@ -349,6 +358,117 @@ def clone_private(origin: Path, target: Path) -> None:
         target.mkdir(parents=True, exist_ok=True)
 
 
+def private_record(slot: int) -> Path:
+    """The paths the slot keeps private, outside the home so a rebuild keeps them."""
+    return HOME_BASE / str(slot) / "private.json"
+
+
+def private_paths(slot: int) -> list[str]:
+    try:
+        paths = json.loads(private_record(slot).read_text())
+    except (OSError, ValueError):
+        return []
+    return [p for p in paths if isinstance(p, str)] if isinstance(paths, list) else []
+
+
+def remember_private(slot: int, paths: list[str]) -> list[str]:
+    known = private_paths(slot)
+    merged = known + [p for p in paths if p not in known]
+    if merged != known:
+        private_record(slot).parent.mkdir(parents=True, exist_ok=True)
+        tmp = private_record(slot).with_suffix(".tmp")
+        tmp.write_text(json.dumps(merged, indent=2) + "\n")
+        tmp.replace(private_record(slot))
+    return merged
+
+
+def home_relative(path: str) -> str:
+    """A path under the home, as given to --private or links: relative, or ~/..., or absolute under $HOME."""
+    raw = path
+    if path.startswith("~/"):
+        path = path[2:]
+    elif os.path.isabs(path):
+        try:
+            path = str(Path(path).relative_to(Path.home()))
+        except ValueError:
+            die(f"{raw} is not under the home directory")
+    parts = [part for part in Path(path).parts if part not in ("", ".")]
+    if not parts or ".." in parts or os.path.isabs(path):
+        die(f"{raw}: give a path under the home, like .config/myapp")
+    return str(Path(*parts))
+
+
+def make_private(sb: Path, real: Path, rel: str) -> bool:
+    """Make sb/rel a private copy of real/rel (an empty directory when real/rel
+    does not exist). Linked parent directories become real ones whose entries
+    still link to the real home, so only rel itself stops being shared.
+    Idempotent: a path that is already private is left as it is. True if
+    something changed."""
+    sb_real = os.path.realpath(sb)
+    parts = Path(rel).parts
+    changed = False
+    for depth in range(1, len(parts) + 1):
+        here = sb.joinpath(*parts[:depth])
+        origin = real.joinpath(*parts[:depth])
+        leaf = depth == len(parts)
+        if here.is_symlink():
+            if os.path.realpath(here).startswith(sb_real + os.sep):
+                if leaf:
+                    break  # points inside the nest home: private already
+                continue
+            here.unlink()
+            changed = True
+            if leaf:
+                if origin.is_dir():
+                    clone_private(origin, here)
+                elif origin.exists():
+                    subprocess.run(["cp", "-a", "--reflink=auto", str(origin), str(here)], check=True)
+                else:
+                    here.mkdir(parents=True)
+            else:
+                here.mkdir()
+                if origin.is_dir():
+                    link_entries(origin, here, set())
+        elif not here.exists():
+            changed = True
+            if leaf and origin.exists() and not origin.is_dir():
+                subprocess.run(["cp", "-a", "--reflink=auto", str(origin), str(here)], check=True)
+            elif leaf and origin.is_dir():
+                clone_private(origin, here)
+            else:
+                here.mkdir(parents=True)
+                if not leaf and origin.is_dir():
+                    link_entries(origin, here, set())
+        if not os.path.realpath(here).startswith(sb_real + os.sep):
+            die(f"{here} leads outside the nest home; refusing to touch it")
+    return changed
+
+
+def shared_paths(sb: Path) -> dict[str, str]:
+    """Symlinks in the nest home that lead out of it, relative path -> target."""
+    sb_real = os.path.realpath(sb)
+    out: dict[str, str] = {}
+    for dirpath, dirnames, filenames in os.walk(sb):  # never follows symlinked directories
+        for name in sorted(dirnames + filenames):
+            path = Path(dirpath) / name
+            if path.is_symlink():
+                target = os.path.realpath(path)
+                if not target.startswith(sb_real + os.sep):
+                    out[str(path.relative_to(sb))] = target
+    return dict(sorted(out.items()))
+
+
+def path_status(sb: Path, rel: str) -> tuple[str, str]:
+    """("private", path) or ("shared", target): shared when rel or one of its parents links out of the home."""
+    sb_real = os.path.realpath(sb)
+    parts = Path(rel).parts
+    for depth in range(1, len(parts) + 1):
+        here = sb.joinpath(*parts[:depth])
+        if here.is_symlink() and not os.path.realpath(here).startswith(sb_real + os.sep):
+            return "shared", os.path.realpath(sb.joinpath(*parts))
+    return "private", str(sb.joinpath(*parts))
+
+
 def write_bashrc(sb: Path, real: Path, path: Path) -> None:
     """Omarchy's env-bootstrap, sourced by every bash, resets OMARCHY_PATH to the
     host tree. Install the session bootstrap before sourcing user files, so
@@ -377,7 +497,15 @@ def write_bashrc(sb: Path, real: Path, path: Path) -> None:
 def make_home(slot: int, reuse: bool, path: Path) -> Path:
     """The nest's private home: symlinks to the real one, except
     Omarchy/Hyprland config and Omarchy state, which are reflink clones the
-    nest owns, and browser profiles, which start empty."""
+    nest owns, browser profiles, which start empty, and the slot's --private
+    paths."""
+    sb = build_home(slot, reuse, path)
+    for rel in private_paths(slot):
+        make_private(sb, Path.home(), rel)
+    return sb
+
+
+def build_home(slot: int, reuse: bool, path: Path) -> Path:
     real = Path.home()
     sb = HOME_BASE / str(slot) / "home"
     if sb.is_dir() and reuse:
@@ -541,6 +669,34 @@ def cmd_diff(args: list[str]) -> int:
     return 0
 
 
+def cmd_links(args: list[str]) -> int:
+    as_json = "--json" in args
+    rest = [a for a in args if a != "--json"]
+    if not rest or not is_slot(rest[0]):
+        die("links needs a slot number 1-9")
+    slot = int(rest[0])
+    sb = nest_home(slot) or die(f"nest {slot} has no private home (never started, or cleaned)")
+    if len(rest) == 1:
+        shared = shared_paths(sb)
+        if as_json:
+            print(json.dumps({"home": str(sb), "shared": shared, "private": private_paths(slot)}, indent=2))
+        else:
+            print(f"# nest {slot}: these paths are symlinks to the real home; writes through them change real files."
+                  f"\n# Make one private with: omadev ensure {slot} --private <path> (remembered: "
+                  f"{', '.join(private_paths(slot)) or 'none'})", file=sys.stderr)
+            for rel, target in shared.items():
+                print(f"{rel} -> {target}")
+        return 0
+    results = {p: path_status(sb, home_relative(p)) for p in rest[1:]}
+    if as_json:
+        print(json.dumps({p: {"state": s, "path": where} for p, (s, where) in results.items()}, indent=2))
+    else:
+        for p, (state, where) in results.items():
+            missing = "" if os.path.lexists(where) else " (not there yet)"
+            print(f"{p}: {state}" + (f" -> {where}" if state == "shared" else "") + missing)
+    return 1 if any(state == "shared" for state, _ in results.values()) else 0
+
+
 def cmd_clean(args: list[str]) -> int:
     target = args[0] if args else ""
     slots = list(SLOTS) if target == "all" else [int(target)] if is_slot(target) else die("clean needs a slot number 1-9 or all")
@@ -583,6 +739,7 @@ def parse_start(argv: list[str]) -> argparse.Namespace:
     p.add_argument("--scale", default="1")
     p.add_argument("--place", default=os.environ.get("OMADEV_PLACE") or "workspace", choices=["workspace", "tile"])
     p.add_argument("--plugin", action="append", default=[])
+    p.add_argument("--private", action="append", default=[])
     # Everything after "--" goes to Hyprland untouched.
     extra: list[str] = []
     if "--" in argv:
@@ -614,6 +771,7 @@ def validate_start(ns: argparse.Namespace) -> tuple[Path, list[Path]]:
     plugins = [Path(os.path.realpath(p)) for p in ns.plugin]
     for plugin in plugins:
         plugin_id(plugin)
+    ns.private = [home_relative(p) for p in ns.private]
     return path, plugins
 
 
@@ -705,6 +863,7 @@ def choose_slot(requested: str | None) -> int:
 
 def nest_environment(slot: int, ns: argparse.Namespace, path: Path, plugins: list[Path]) -> dict[str, str]:
     env = dict(os.environ)
+    remember_private(slot, getattr(ns, "private", []))
     sb = make_home(slot, ns.reuse, path)
     configure_idle(sb, ns.idle)
     for plugin in plugins:
@@ -1113,6 +1272,8 @@ def start_detached(slot: int, argv: list[str], ns: argparse.Namespace) -> int:
     child_argv += [f"--{flag}" for flag in ("no-shell", "idle", "reuse", "force") if getattr(ns, flag.replace("-", "_"))]
     for plugin in ns.plugin:
         child_argv += ["--plugin", plugin]
+    for rel in ns.private:
+        child_argv += ["--private", rel]
     if ns.extra:
         child_argv += ["--", *ns.extra]
     assert HELD_LOCK is not None
@@ -1173,6 +1334,10 @@ def cmd_ensure(argv: list[str]) -> int:
                 "pass its --owner or pick another slot")
         for plugin in ns.plugin:  # links into the live nest home; the nested shell hot-reloads
             link_plugin(Path(env["OMADEV_HOME"]), Path(os.path.realpath(plugin)))
+        private = [home_relative(p) for p in ns.private]
+        remember_private(slot, private)
+        for rel in private:  # running apps that hold the old path open keep it until restarted
+            make_private(Path(env["OMADEV_HOME"]), Path.home(), rel)
         if not shell_ping(slot):
             die(f"nest {slot} is running but its shell does not answer; see: omadev log {slot}")
     elif cmd_start([str(slot), "--detach", *rest]) != 0:
@@ -1678,6 +1843,11 @@ def stop_one(slot: int, kill: bool) -> bool:
         return False
     (RUN_DIR / str(slot) / "stopping").unlink(missing_ok=True)
     print(f"nest {slot} stopped")
+    if nest_home(slot):
+        kept = private_paths(slot)
+        print(f"omadev: nest {slot}'s home is kept. Start it with --reuse to get it back as it was; without --reuse "
+              f"it is rebuilt from the real home" + (f" (private again: {', '.join(kept)})." if kept else
+              ", and paths you made private by hand link to the real home again."), file=sys.stderr)
     return True
 
 
@@ -1734,7 +1904,7 @@ def cmd_exec(prefix: list[str]):
 COMMANDS = {
     "start": cmd_start, "ensure": cmd_ensure, "list": cmd_list, "focus": cmd_focus,
     "run": cmd_exec([]), "hyprctl": cmd_exec(["hyprctl"]), "shell": cmd_exec(["omarchy-shell"]),
-    "screenshot": cmd_screenshot, "log": cmd_log, "diff": cmd_diff, "stop": cmd_stop, "clean": cmd_clean,
+    "screenshot": cmd_screenshot, "log": cmd_log, "diff": cmd_diff, "links": cmd_links, "stop": cmd_stop, "clean": cmd_clean,
     "setup": cmd_setup, "capabilities": cmd_capabilities, "_publish": cmd_publish, "release": cmd_release, "input-status": cmd_input_status,
 }
 

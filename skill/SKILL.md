@@ -70,6 +70,7 @@ omadev log 3 [-f] [--all]                       # shell + app output; --all keep
 
 # Inspect and finish
 omadev diff 3                                   # config/state the nest changed vs the host
+omadev links 3 [path...]                        # what still links to the real home (writes go to real files)
 omadev stop 3                                   # blocks until the slot is free
 omadev clean 3                                  # remove the nest's private home
 omadev list --json                              # all slots, owners, pids, paths; state free|starting|running|stopping|unreachable
@@ -105,6 +106,12 @@ omadev list --json                              # all slots, owners, pids, paths
   symlink to the real home again, so the app under test writes the user's files.
   Pass `--reuse` to keep a home across stop/start, and check what is shared before
   writing through it.
+- Testing an app that writes outside Omarchy config (its own `~/.config/<app>`,
+  `~/.local/bin`, `mimeapps.list`, `~/.local/share/applications`)? Claim the slot with
+  `ensure N --private <path>` for each: the nest gets its own copy, and the slot keeps
+  them private across rebuilds until `clean N`. `omadev links N <path>...` tells you
+  per path whether it is private or shared (exit 1 if any is shared): check before
+  letting the app write.
 - `unreachable` in `list` means a record exists but this environment cannot reach the nest's
   compositor socket under $XDG_RUNTIME_DIR/hypr (an agent sandbox without it). Nothing is deleted;
   run omadev from an environment that has the runtime directory. Sessions without an owner are
