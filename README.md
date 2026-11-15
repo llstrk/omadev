@@ -229,11 +229,26 @@ omadev diff 3                                          # what the nest changed
 omadev stop 3 && omadev clean 3                        # the home is kept until clean
 ```
 
+Everything outside Omarchy/Hyprland config, Omarchy state and browser
+profiles is a symlink to the real home, so an app under test in a nest writes
+the real `~/.config/<app>`. `--private <path>` (on `start` or `ensure`, also on
+a running nest) gives the nest its own copy of a path instead; the slot
+remembers it, also when its home is rebuilt, until `clean`. A path under a
+linked directory splits only that path: with `--private .local/share/applications`,
+`.local/share` becomes a real directory whose other entries still link to the
+real home (new entries created there stay in the nest). `links N` lists what
+is still shared; `links N <path>...` says per path and exits 1 if any is shared.
+
+```bash
+omadev ensure 3 --owner me --private .config/myapp --private .local/bin --private .config/mimeapps.list
+omadev links 3 .config/myapp ~/.local/share/applications   # private / shared -> real path
+```
+
 `--plugin <dir>` links a checkout, typically a git worktree, into the nest's
 plugins directory under its manifest id, so each teammate works on its own
 branch and the orchestrator merges branches instead of copying files. It also
 works through `ensure` on a running nest. `--reuse` keeps the previous home of
-a slot instead of cloning a fresh one. Reusing a home from an older release privatizes its previously shared Hyprland directory first. `diff` includes Hyprland config but excludes linked checkouts (use git there) and churny state such as clipboard history.
+a slot instead of cloning a fresh one; `stop` reminds you of it. Reusing a home from an older release privatizes its previously shared Hyprland directory first. `diff` includes Hyprland config but excludes linked checkouts (use git there) and churny state such as clipboard history.
 
 ## Checkout sessions and safety boundaries
 
