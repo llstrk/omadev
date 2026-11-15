@@ -119,6 +119,7 @@ Hyprland itself keeps running without an output.
 omadev                                  # lowest free slot, installed /usr/share/omarchy
 omadev start 2 --path ~/Projects/omarchy   # slot 2 runs a checkout
 omadev --scale 1.25                     # HiDPI nest; the size always follows the window
+omadev scale 3 2                        # change a running nest's scale (or: ensure 3 --scale 2)
 omadev --no-shell                       # compositor only
 omadev start 2                          # host keys blocked until capture by default; automation still works
 omadev list                             # the nine slots
@@ -391,6 +392,14 @@ without watching it. Needs ffmpeg.
   monitor rule is re-applied. The keeper polls the output size twice a second
   and re-applies the rule on a change, so bar, background and windows follow
   within about a second. There is no fixed-size mode.
+- **Scale.** `--scale` seeds `$XDG_RUNTIME_DIR/omadev/N/scale`, which the
+  nest's Hyprland config and the keeper both read (`omadev_scale()` in
+  `libexec/hyprland.lua`). `omadev scale N <s>` and `ensure N --scale <s>`
+  rewrite it and apply it at once with an explicit-mode monitor rule followed
+  by a `preferred` one, so the new scale survives resizes and reloads. Hyprland
+  only takes a scale that divides the output into whole pixels; a rejected one
+  restores the previous scale and lists the ones that fit the current size.
+  `ensure` without `--scale` leaves a running nest's scale alone.
 - **Logs.** The `systemd-cat` shim retags the nested shell's journal output
   as `omadev-N`, so `omadev log N` reads one nest without
   PID archaeology. The compositor's own log stays in its runtime directory.

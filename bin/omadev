@@ -71,6 +71,7 @@ Usage:
                                    grim inside nest N; prints the file. --layer/--window crop to that
                                    layer surface or window, --region to screenshot pixels; --pad adds
                                    P pixels around the crop
+  omadev scale [N] <s>             Change a running nest's output scale (also: ensure N --scale <s>)
   omadev wait [N] layer NS | window MATCH | shell [--gone] [--timeout S]
                                    Wait until a layer surface (by namespace) or a window (class or title
                                    contains MATCH) is mapped in nest N, or the shell answers; --gone
@@ -104,7 +105,8 @@ Start options:
   --force          Allow starting inside another nest (shares the host's nine slots)
   --owner <name>   Label the nest (shown by list; for orchestrators assigning slots to teammates)
   --path <dir>     Omarchy source tree (default: $OMADEV_PATH, then $OMARCHY_PATH)
-  --scale <n>      Output scale of the nest (default: 1); its size always follows the host window
+  --scale <n>      Output scale of the nest (default: 1); its size always follows the host window.
+                   On a running nest, `ensure --scale` and `omadev scale` change it live
   --place <mode>   workspace: the nest joins the host workspace named omadev without stealing focus (default)
                    tile: leave the window where the host's layout puts it   (env: OMADEV_PLACE)
   --no-shell       Compositor only
@@ -753,7 +755,7 @@ def parse_start(argv: list[str]) -> argparse.Namespace:
     p.add_argument("--owner", default="")
     p.add_argument("--path", default=os.environ.get("OMADEV_PATH") or os.environ.get("OMARCHY_PATH") or "/usr/share/omarchy")
     p.add_argument("--size", default="", help=argparse.SUPPRESS)  # refused below, with a reason
-    p.add_argument("--scale", default="1")
+    p.add_argument("--scale", default=None)  # None: not given (ensure leaves a running nest's scale alone)
     p.add_argument("--place", default=os.environ.get("OMADEV_PLACE") or "workspace", choices=["workspace", "tile"])
     p.add_argument("--plugin", action="append", default=[])
     p.add_argument("--private", action="append", default=[])
@@ -789,7 +791,91 @@ def validate_start(ns: argparse.Namespace) -> tuple[Path, list[Path]]:
     for plugin in plugins:
         plugin_id(plugin)
     ns.private = [home_relative(p) for p in ns.private]
+    ns.scale = check_scale(ns.scale or "1")
     return path, plugins
+
+
+def check_scale(value: str) -> str:
+    try:
+        scale = float(value)
+    except ValueError:
+        die(f"--scale must be a number, got {value!r}")
+    if not 0.5 <= scale <= 4:
+        die(f"--scale must be between 0.5 and 4, got {value}")
+    return f"{scale:g}"
+
+
+def scale_file(slot: int) -> Path:
+    """Read by the nest's Hyprland config on every (re)load: the scale survives `hyprctl reload`."""
+    return RUN_DIR / str(slot) / "scale"
+
+
+def fitting_scales(width: int, height: int) -> list[str]:
+    """Common scales Hyprland accepts for a width x height output: the logical size must be whole."""
+    out = []
+    for s in (1, 1.25, 1.5, 1.6, 2, 2.5, 3):
+        if abs(width / s - round(width / s)) < 1e-6 and abs(height / s - round(height / s)) < 1e-6:
+            out.append(f"{s:g}")
+    return out
+
+
+def apply_scale(env: dict[str, str], slot: int, scale: str) -> bool:
+    """Write the scale file and apply it now; True if the output took it.
+
+    A monitor rule with mode "preferred" at the current size triggers no
+    modeset, so the new scale would wait for the next resize. An explicit
+    mode applies it now, and a "preferred" rule goes last so the output keeps
+    following the host window. The scale file is what the nest's config and
+    the keeper (which re-applies the rule after every resize) read."""
+    scale_file(slot).write_text(scale + "\n")
+    monitor = (nest_json(env, "monitors") or [{}])[0]
+    if not monitor.get("width"):
+        return False
+    name = monitor.get("name", "WAYLAND-1")
+
+    def rule(mode: str) -> str:
+        return f'hl.monitor({{ output = "{name}", mode = "{mode}", position = "0x0", scale = {scale} }})'
+
+    def applied() -> bool:
+        m = (nest_json(env, "monitors") or [{}])[0]
+        return abs(float(m.get("scale") or 0) - float(scale)) <= 0.01
+    for _ in range(2):  # once more if a modeset was still settling
+        subprocess.run(["hyprctl", "eval", rule(f"{monitor['width']}x{monitor['height']}")], env=env,
+                       capture_output=True, timeout=10)
+        took = wait_until(applied, 3)  # the modeset lands a moment after eval returns
+        subprocess.run(["hyprctl", "eval", rule("preferred")], env=env, capture_output=True, timeout=10)
+        if took and wait_until(applied, 2):
+            return True
+    return False
+
+
+def set_scale(slot: int, scale: str) -> None:
+    """Apply a new output scale to a running nest and record it in its session file."""
+    env = nest_env(slot)
+    if "OMADEV_SCALE_FILE" not in env:
+        die(f"nest {slot} was started by an older omadev; restart it (with --reuse to keep its home) to change its scale live")
+    before = env.get("OMADEV_SCALE", "1")
+    monitor = (nest_json(env, "monitors") or [{}])[0]
+    if not apply_scale(env, slot, scale):
+        apply_scale(env, slot, before)  # never leave a rejected scale behind for the next reload
+        fits = fitting_scales(int(monitor.get("width") or 0), int(monitor.get("height") or 0))
+        die(f"Hyprland did not take scale {scale} for nest {slot}'s {monitor.get('width')}x{monitor.get('height')} output "
+            f"(the scaled size must be whole pixels); kept {before}. Scales that fit now: {', '.join(fits) or '1'}")
+    record = env_file(slot)
+    lines = record.read_text().splitlines()
+    lines = [l for l in lines if not l.startswith("OMADEV_SCALE=")] + [f"OMADEV_SCALE={shlex.quote(scale)}"]
+    tmp = record.with_suffix(".tmp")
+    tmp.write_text("\n".join(lines) + "\n")
+    tmp.replace(record)
+
+
+def cmd_scale(args: list[str]) -> int:
+    slot, rest = split_slot(args)
+    if len(rest) != 1:
+        die("usage: omadev scale [N] <scale>")
+    set_scale(slot, check_scale(rest[0]))
+    print(f"nest {slot} scale {check_scale(rest[0])}")
+    return 0
 
 
 def lock_file(slot: int) -> Path:
@@ -881,6 +967,8 @@ def choose_slot(requested: str | None) -> int:
 def nest_environment(slot: int, ns: argparse.Namespace, path: Path, plugins: list[Path]) -> dict[str, str]:
     env = dict(os.environ)
     remember_private(slot, getattr(ns, "private", []))
+    scale_file(slot).parent.mkdir(parents=True, exist_ok=True)
+    scale_file(slot).write_text(f"{ns.scale}\n")  # a new start begins from its own --scale
     sb = make_home(slot, ns.reuse, path)
     configure_idle(sb, ns.idle)
     for plugin in plugins:
@@ -900,6 +988,7 @@ def nest_environment(slot: int, ns: argparse.Namespace, path: Path, plugins: lis
         OMADEV_SLOT=str(slot),
         OMADEV_ENV_FILE=str(env_file(slot)),
         OMADEV_SCALE=ns.scale,
+        OMADEV_SCALE_FILE=str(scale_file(slot)),
         OMADEV_PLACE=ns.place,
         OMADEV_NO_SHELL="1" if ns.no_shell else "0",
         OMADEV_IDLE="1" if ns.idle else "0",
@@ -1357,6 +1446,8 @@ def cmd_ensure(argv: list[str]) -> int:
             make_private(Path(env["OMADEV_HOME"]), Path.home(), rel)
         if not shell_ping(slot):
             die(f"nest {slot} is running but its shell does not answer; see: omadev log {slot}")
+        if ns.scale is not None and check_scale(ns.scale) != env.get("OMADEV_SCALE", "1"):
+            set_scale(slot, check_scale(ns.scale))
     elif cmd_start([str(slot), "--detach", *rest]) != 0:
         return 1
     print(json.dumps(slot_json(slot), indent=2))
@@ -2147,7 +2238,7 @@ def cmd_exec(prefix: list[str]):
 COMMANDS = {
     "start": cmd_start, "ensure": cmd_ensure, "list": cmd_list, "focus": cmd_focus,
     "run": cmd_exec([]), "hyprctl": cmd_exec(["hyprctl"]), "shell": cmd_exec(["omarchy-shell"]),
-    "screenshot": cmd_screenshot, "click": cmd_pointer("click"), "move": cmd_pointer("move"), "record": cmd_record, "wait": cmd_wait, "log": cmd_log, "diff": cmd_diff, "links": cmd_links, "stop": cmd_stop, "clean": cmd_clean,
+    "screenshot": cmd_screenshot, "click": cmd_pointer("click"), "move": cmd_pointer("move"), "record": cmd_record, "wait": cmd_wait, "scale": cmd_scale, "log": cmd_log, "diff": cmd_diff, "links": cmd_links, "stop": cmd_stop, "clean": cmd_clean,
     "setup": cmd_setup, "capabilities": cmd_capabilities, "_publish": cmd_publish, "release": cmd_release, "input-status": cmd_input_status,
 }
 
