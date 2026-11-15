@@ -337,18 +337,42 @@ full-screen overlay with `--region`.
 
 ```bash
 omadev record 3 start ~/report.mp4          # background recorder, about 10 fps, up to 600 s (--fps, --max)
+omadev record 3 start ~/demo.mp4 --size 1920x1080   # or a fixed size: the nest, and the video, are exactly 1920x1080
 omadev record 3 caption "1. The picker opens"
 omadev click 3 800 600 --mods shift
 omadev record 3 caption "2. Shift+click saves the rule"
 omadev record 3 stop --sheet                # encodes; --sheet also writes report.sheet.jpg, a contact sheet
 ```
 
-Frames are grim screenshots at the nest's full resolution (scaled to about
-1920 wide), kept on disk in `~/.local/state/omadev/N/record` until the encode.
-Each frame lasts until the next, so the video keeps real time; each caption is
+Frames are grim screenshots at the nest's full resolution, kept on disk in
+`~/.local/state/omadev/N/record` until the encode. A frame identical to the one
+before it is dropped, so a still screen costs nothing. Each frame lasts until
+the next, so the video keeps real time; each caption is
 burned in from its call until the next caption (`caption ""` clears it). The
 contact sheet shows 30 frames on one image, a quick way to check a take
 without watching it. Needs ffmpeg.
+
+Recordings are mostly text, so `--quality` defaults to `high`: lossless PNG
+frames, never downscaled, and H.264 at crf 16 in 4:2:0, which every browser
+and phone plays. On a text screen that measured SSIM 0.998 against the
+screenshot, where the old downscaled JPEG pipeline managed 0.916. `max` encodes
+4:4:4 at crf 12 (no colour subsampling: the sharpest coloured text, SSIM
+0.9996), but many browsers and phones cannot play 4:4:4 H.264; use it for
+archives, not posts. `draft` is JPEG frames at most 1280 wide and crf 26, for
+long takes where size matters more. A 15 s take of a scrolling 3052x1682
+terminal in `high` came to 1.5 MB.
+
+While a nest records, its window on the host has a red border (a window rule
+on the `omadev-recording` tag), the bar widget's icon turns urgent and the
+session's row reads `● rec 1:23`, and `list --json` has a `recording` field.
+The grid leaves that window where and as big as it is, so other nests starting
+and stopping cannot change the video's size; they may overlap it on the host
+for a while, which does not reach the video. `--size WxH` sets the nest's
+output to exactly that many pixels for the recording (the window may be larger
+than the monitor); it must divide evenly at the nest's scale, so `scale 2` with `--size 2560x1440`
+records a 1280x720 layout at 2x. However the recording ends (`stop`, `--max`,
+the nest going away), the recorder takes the border off and puts the window
+back in the grid. `omadev scale` refuses while a nest records.
 
 ## What is shared and what is not
 

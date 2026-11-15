@@ -67,7 +67,7 @@ omadev hyprctl 3 dispatch 'hl.dsp.exec_cmd("ghostty")'   # compositor actions
 omadev run 3 wtype "some text"                  # into the focused app; SUPER+... binds do not fire from wtype
 omadev click 3 X Y [--mods shift] [--button right] [--double]   # pointer click at screenshot pixels
 omadev move 3 X Y                               # hover
-omadev record 3 start out.mp4 / caption "1. ..." / stop --sheet   # captioned video + contact sheet
+omadev record 3 start out.mp4 [--size 1920x1080] / caption "1. ..." / stop --sheet   # captioned video + contact sheet
 omadev screenshot 3 [file.png] [--window M | --layer NS | --region X,Y,W,H] [--pad P]   # prints the path
 omadev wait 3 layer NS | window M | shell [--gone] [--timeout S]   # instead of sleep loops
 omadev log 3 [-f] [--all]                       # shell + app output; --all keeps benign noise
@@ -146,6 +146,11 @@ omadev list --json                              # all slots, owners, pids, paths
   `caption` before each step, `stop --sheet`. Check the take on the contact sheet
   (`file.sheet.jpg`) before sending it; one-time setup done before `start` stays out
   of the video. Clear stale notifications first (`omadev shell N notifications dismissAll`).
+  Pass `--size WxH` when the video's size matters (demos, posts): the nest is held at
+  exactly that size until `stop`, and other nests starting or stopping cannot resize it.
+  The user sees a red border on a recording nest's window; set the scale before `start`.
+  Quality defaults to `high` (full resolution, crisp text, plays everywhere); `--quality max`
+  is 4:4:4 (sharpest, but often unplayable in browsers/phones), `draft` is small and soft.
 - Wait on state, not time: `omadev wait N layer <namespace>` after opening an overlay,
   `wait N window <class>` after launching an app, `--gone` after closing. A terminal's
   shell usually renames its window, so match a terminal by class (`foot --app-id=x`),

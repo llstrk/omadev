@@ -189,6 +189,8 @@ Panel {
 
   // Host face.
   property var sessions: []          // non-free entries of `omadev list --json` (starting, running, stopping)
+  // `omadev record` in progress: the bar icon turns urgent and the row says so.
+  readonly property var recordingSlots: sessions.filter(function(s) { return !!s.recording }).map(function(s) { return s.slot })
   property int runningCount: 0
   property bool loaded: false
   property int selectedIndex: -1
@@ -487,10 +489,16 @@ Panel {
     return "up " + (h > 0 ? h + "h " + (m % 60) + "m" : m + "m")
   }
 
+  function recordingLabel(s) {
+    var secs = Math.max(0, Math.round(now - Number(s.recording.since || now)))
+    var m = Math.floor(secs / 60), r = secs % 60
+    return "● rec " + m + ":" + (r < 10 ? "0" : "") + r + (s.recording.size ? " " + s.recording.size : "")
+  }
+
   function sessionMeta(s) {
     if (s.state === "stopping") return "Stopping…"
     if (s.state === "starting") return "Starting…"
-    var parts = [shortPath(s.omarchy_path)]
+    var parts = s.recording ? [recordingLabel(s), shortPath(s.omarchy_path)] : [shortPath(s.omarchy_path)]
     if (s.owner) parts.push(s.owner)
     var plugins = s.plugins ? Object.keys(s.plugins) : []
     if (plugins.length) parts.push(plugins.join(", "))
@@ -1158,7 +1166,18 @@ Panel {
     bar: root.bar
     text: "󰌌"
     opacity: root.sessions.length > 0 ? 1.0 : 0.5
+    active: root.recordingSlots.length > 0
+    tooltipText: root.recordingSlots.length > 0
+      ? "Recording: session " + root.recordingSlots.join(", ") + " (omadev record N stop to finish)" : ""
     onPressed: function(b) { root.toggle() }
+  }
+
+  // The recording clock in the panel; the list itself refreshes on start/stop.
+  Timer {
+    interval: 1000
+    repeat: true
+    running: root.opened && root.recordingSlots.length > 0
+    onTriggered: root.now = Date.now() / 1000
   }
 
   KeyboardPanel {
@@ -1381,7 +1400,8 @@ Panel {
           width: parent.width
           textFormat: Text.PlainText
           text: row.confirmingStop ? "Press d again to confirm stop" : root.sessionMeta(row.session)
-          color: row.confirmingStop ? row.rowColor : Qt.darker(root.bar.foreground, 1.4)
+          color: row.confirmingStop ? row.rowColor
+            : (row.session.recording ? (root.bar ? root.bar.urgent : Color.urgent) : Qt.darker(root.bar.foreground, 1.4))
           font.family: root.bar.fontFamily
           font.pixelSize: Style.font.caption
           elide: Text.ElideRight
